@@ -1,0 +1,12 @@
+{
+  "name": "media-library-open-bench",
+  "private": true,
+  "type": "module",
+  "description": "Synthetic benchmark: opening a media library listing on different operating systems.",
+  "scripts": {
+    "bench": "node bench/run.mjs"
+  },
+  "dependencies": {
+    "sharp": "0.34.5"
+  }
+}

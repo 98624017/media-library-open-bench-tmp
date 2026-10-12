@@ -1,0 +1,66 @@
+name: bench
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: ubuntu-24.04, os: ubuntu-24.04 }
+          - { label: windows-2025-defender-on, os: windows-2025, defender: 'on' }
+          - { label: windows-2025-defender-off, os: windows-2025, defender: 'off' }
+          - { label: windows-2022-defender-on, os: windows-2022, defender: 'on' }
+          - { label: windows-11-arm-defender-on, os: windows-11-arm, defender: 'on', experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+
+      - name: Configure antivirus and storage roots
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $base = 'C:\bench-data'
+          New-Item -ItemType Directory -Force -Path $base | Out-Null
+          Get-MpPreference | Select-Object DisableRealtimeMonitoring, ExclusionPath, ExclusionProcess | Format-List
+          if ('${{ matrix.defender }}' -eq 'on') {
+            try { Remove-MpPreference -ExclusionPath (Get-MpPreference).ExclusionPath -ErrorAction Stop } catch { Write-Host "exclusions: $_" }
+            try { Remove-MpPreference -ExclusionProcess (Get-MpPreference).ExclusionProcess -ErrorAction Stop } catch { Write-Host "process exclusions: $_" }
+            try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop } catch { Write-Host "enable failed: $_" }
+          } else {
+            try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop } catch { Write-Host "disable failed: $_" }
+          }
+          Start-Sleep -Seconds 5
+          Get-MpComputerStatus | Select-Object AMServiceEnabled, AntivirusEnabled, RealTimeProtectionEnabled, OnAccessProtectionEnabled | Format-List
+          $roots = "local=$base"
+          try {
+            New-SmbShare -Name benchshare -Path $base -FullAccess Everyone -ErrorAction Stop | Out-Null
+            if (Test-Path '\\localhost\benchshare') { $roots += ';unc=\\localhost\benchshare' }
+          } catch { Write-Host "share unavailable: $_" }
+          "BENCH_ROOTS=$roots" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-Volume -DriveLetter C | Format-List DriveLetter, FileSystem, DriveType, Size
+
+      - name: Run benchmark
+        run: node bench/run.mjs --label=${{ matrix.label }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.label }}
+          path: results
+          if-no-files-found: warn
+          retention-days: 7
