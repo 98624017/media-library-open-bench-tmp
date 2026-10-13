@@ -1,0 +1,126 @@
+name: dirsync-crash-probe
+
+on:
+  push:
+    branches: [dirsync-crash-probe]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe runner filesystem and process-crash recovery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $probeRoot = Join-Path $env:RUNNER_TEMP 'dirsync-crash-probe-runner'
+          New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+          try {
+            $env:PROBE_ROOT = $probeRoot
+            node .\probe.mjs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Probe FAT32 and exFAT virtual volumes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          function Invoke-VolumeProbe([string] $fileSystem) {
+            $ErrorActionPreference = 'Stop'
+            $vhdPath = Join-Path $env:RUNNER_TEMP ("dirsync-crash-probe-" + [Guid]::NewGuid().ToString('N') + '.vhdx')
+            $diskpartPath = Join-Path $env:RUNNER_TEMP ("dirsync-crash-probe-" + [Guid]::NewGuid().ToString('N') + '.txt')
+            $driveLetter = $null
+            $probeRoot = $null
+            $probeStarted = $false
+            $cleanupFailed = $false
+            try {
+              if (-not (Get-Command diskpart.exe -ErrorAction SilentlyContinue)) {
+                Write-Output "volume=$fileSystem result=not-tested reason=diskpart-unavailable"
+                return
+              }
+              $driveLetter = (90..68 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path (([string]$_) + ':\')) } | Select-Object -First 1)
+              if (-not $driveLetter) {
+                Write-Output "volume=$fileSystem result=not-tested reason=no-free-drive-letter"
+                return
+              }
+              $commands = @(
+                "create vdisk file=`"$vhdPath`" maximum=512 type=expandable",
+                "select vdisk file=`"$vhdPath`"",
+                'attach vdisk',
+                'create partition primary',
+                "format fs=$fileSystem quick label=DIRSYNC$fileSystem",
+                "assign letter=$driveLetter",
+                'exit'
+              )
+              Set-Content -LiteralPath $diskpartPath -Value $commands -Encoding ascii
+              & diskpart.exe /s $diskpartPath | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                Write-Output "volume=$fileSystem result=not-tested reason=diskpart-failed"
+                return
+              }
+              $volume = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
+              $disk = Get-DiskImage -ImagePath $vhdPath -ErrorAction Stop | Get-Disk -ErrorAction Stop
+              $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
+              if ($volume.FileSystem -ne $fileSystem -or $partition.DiskNumber -ne $disk.Number) {
+                Write-Output "volume=$fileSystem result=not-tested reason=volume-identity-mismatch"
+                return
+              }
+              $probeRoot = "${driveLetter}:\dirsync-crash-probe"
+              New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+              $env:PROBE_ROOT = $probeRoot
+              $env:PROBE_VOLUME_FS = $fileSystem
+              $probeStarted = $true
+              node .\probe.mjs
+              if ($LASTEXITCODE -ne 0) { throw "probe-failed-$fileSystem" }
+            } catch {
+              if ($probeStarted) {
+                Write-Output "volume=$fileSystem result=failed reason=probe-assertion-failed"
+                throw
+              }
+              Write-Output "volume=$fileSystem result=not-tested reason=permission-or-filesystem-error"
+            } finally {
+              if ($probeRoot) {
+                Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $probeRoot) { $cleanupFailed = $true }
+              }
+              if (Get-Command Dismount-DiskImage -ErrorAction SilentlyContinue) {
+                Dismount-DiskImage -ImagePath $vhdPath -ErrorAction SilentlyContinue
+              }
+              if (Test-Path -LiteralPath $vhdPath) {
+                $detach = @(
+                  "select vdisk file=`"$vhdPath`"",
+                  'detach vdisk',
+                  'exit'
+                )
+                Set-Content -LiteralPath $diskpartPath -Value $detach -Encoding ascii
+                & diskpart.exe /s $diskpartPath | Out-Null
+              }
+              Remove-Item -LiteralPath $diskpartPath -Force -ErrorAction SilentlyContinue
+              Remove-Item -LiteralPath $vhdPath -Force -ErrorAction SilentlyContinue
+              if ($vhdPath -and (Test-Path -LiteralPath $vhdPath)) { $cleanupFailed = $true }
+              if ($cleanupFailed) { Write-Output "volume=$fileSystem cleanup=not-tested reason=temporary-volume-remove-failed" }
+              Remove-Item Env:PROBE_ROOT -ErrorAction SilentlyContinue
+              Remove-Item Env:PROBE_VOLUME_FS -ErrorAction SilentlyContinue
+            }
+          }
+
+          Invoke-VolumeProbe 'FAT32'
+          Invoke-VolumeProbe 'exFAT'
