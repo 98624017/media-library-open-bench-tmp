@@ -122,6 +122,9 @@ test('complete rotated native samples retain distributions; missing rows/observe
       data.rows[0].status = 'written'
     },
     (data) => {
+      data.rows[0].status = 'readback-observed'
+    },
+    (data) => {
       data.cleanedOwnedDirectory = false
     },
     (data) => {

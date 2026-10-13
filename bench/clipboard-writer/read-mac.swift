@@ -10,8 +10,16 @@ var images: [[String: Any]] = []
 for (type, filename) in [(NSPasteboard.PasteboardType.png, "native.png"), (.tiff, "native.tiff")] {
     let data = pasteboard.data(forType: type)
     if let data = data { try data.write(to: directory.appendingPathComponent(filename)) }
+    var bitmapMetadata: [String: Any] = [:]
+    if let data = data, let bitmap = NSBitmapImageRep(data: data) {
+        bitmapMetadata = ["width": bitmap.pixelsWide, "height": bitmap.pixelsHigh,
+                          "bitsPerSample": bitmap.bitsPerSample, "bitsPerPixel": bitmap.bitsPerPixel,
+                          "samplesPerPixel": bitmap.samplesPerPixel, "hasAlpha": bitmap.hasAlpha,
+                          "isPlanar": bitmap.isPlanar, "bitmapFormat": bitmap.bitmapFormat.rawValue,
+                          "colorSpaceName": bitmap.colorSpaceName.rawValue]
+    }
     images.append(["format": type.rawValue, "declared": formats.contains(type.rawValue),
-                   "bytes": data?.count ?? 0, "filename": filename])
+                   "bytes": data?.count ?? 0, "filename": filename, "bitmapMetadata": bitmapMetadata])
 }
 let report: [String: Any] = ["formats": formats, "images": images,
                               "reader": "NSPasteboard.types/data(forType:)", "readOnly": true]

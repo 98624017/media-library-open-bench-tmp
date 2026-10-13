@@ -1,10 +1,11 @@
 const assert = require('node:assert/strict')
-const { readFileSync, writeFileSync } = require('node:fs')
+const { readFileSync, writeFileSync, writeSync } = require('node:fs')
 const { join } = require('node:path')
-const { createInterface } = require('node:readline')
 const { app, clipboard, nativeImage } = require('electron')
+const { connectNativeControl } = require('./protocol.cjs')
 
-const emit = (message) => process.stdout.write(`${JSON.stringify(message)}\n`)
+let control
+const emit = (message) => control.send(message)
 const describe = (image) => ({
   size: image.getSize(),
   scales: image.getScaleFactors().sort((a, b) => a - b)
@@ -32,9 +33,10 @@ async function main() {
       : nativeImage.createFromPath(sourcePath)
   assert(!image.isEmpty(), 'Generated NativeImage preparation failed')
   const prepared = describe(image)
+  control = await connectNativeControl(configuration.controlEndpoint)
   clipboard.clear()
   phase = 'ready'
-  emit({
+  await emit({
     type: 'ready',
     pid: process.pid,
     runtime: process.versions,
@@ -43,11 +45,9 @@ async function main() {
     prepared,
     isolatedUserData: true
   })
-  const input = createInterface({ input: process.stdin })
-  input.on('line', (line) => {
+  while (true) {
     try {
-      assert(line.length < 128, 'Native command exceeded its bound')
-      const command = JSON.parse(line).command
+      const { command } = await control.next('command')
       if (command === 'write') {
         assert.equal(phase, 'ready')
         const rssBeforeBytes = process.memoryUsage.rss()
@@ -57,7 +57,7 @@ async function main() {
         const writeMs = performance.now() - started
         const rssAfterBytes = process.memoryUsage.rss()
         phase = 'written'
-        emit({ type: 'written', writeMs, rssBeforeBytes, rssAfterBytes })
+        await emit({ type: 'written', writeMs, rssBeforeBytes, rssAfterBytes })
       } else if (command === 'readback') {
         assert.equal(phase, 'written')
         const formats = clipboard.availableFormats().sort()
@@ -82,7 +82,7 @@ async function main() {
           )
         }
         phase = 'readback'
-        emit({
+        await emit({
           type: 'readback',
           formats,
           readback: describe(result),
@@ -92,18 +92,32 @@ async function main() {
       } else if (command === 'exit') {
         assert.equal(phase, 'readback')
         clipboard.clear()
-        emit({ type: 'complete', clipboardCleared: true })
+        await emit({ type: 'complete', clipboardCleared: true })
+        control.close()
         app.exit(0)
+        return
       } else throw new Error('Unknown native command')
     } catch (error) {
-      emit({ type: 'error', phase, name: error.name, message: error.message })
+      await emit({ type: 'error', phase, name: error.name, message: error.message })
       clipboard.clear()
+      control.close()
       app.exit(1)
+      return
     }
-  })
+  }
 }
 
-main().catch((error) => {
-  emit({ type: 'error', phase, name: error.name, message: error.message })
+main().catch(async (error) => {
+  const failure = { type: 'error', phase, name: error.name, message: error.message }
+  try {
+    if (control) await emit(failure)
+    else writeSync(2, `${JSON.stringify(failure)}\n`)
+  } catch (transportError) {
+    writeSync(
+      2,
+      `${JSON.stringify({ ...failure, transportError: transportError.code ?? transportError.name })}\n`
+    )
+  }
+  control?.close()
   app.exit(1)
 })

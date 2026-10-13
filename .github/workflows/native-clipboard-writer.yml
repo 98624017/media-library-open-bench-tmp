@@ -2,8 +2,11 @@ name: one-shot-native-clipboard-writer
 
 on:
   workflow_dispatch:
-  push:
-    branches: [native-clipboard-writer-probe]
+    inputs:
+      diagnostic:
+        description: 'Quick 1-sample RGB/alpha diagnosis; cannot satisfy adoption'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,6 +27,9 @@ jobs:
     env:
       BENCH_SOURCE_REVISION: ${{ github.sha }}
       EXPECTED_ARCH: ${{ matrix.arch }}
+      BENCH_SAMPLES: ${{ inputs.diagnostic && 1 || matrix.samples }}
+      BENCH_QUICK_FLAG: ${{ inputs.diagnostic && '--quick' || '' }}
+      BENCH_DIAGNOSTIC_FLAG: ${{ inputs.diagnostic && '--diagnostic-native-formats' || '' }}
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
@@ -40,9 +46,10 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Architecture and completeness self-checks
         timeout-minutes: 5
+        shell: bash
         run: |
           node -e "require('node:assert/strict').equal(process.arch,process.env.EXPECTED_ARCH)"
-          node --test bench/clipboard-writer/validation.test.mjs
+          node --test bench/clipboard-writer/*.test.mjs
       - name: Compile read-only Mac native format observer
         if: ${{ runner.os == 'macOS' }}
         timeout-minutes: 5
@@ -58,19 +65,19 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=rgb-2k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=rgb-2k --samples="$BENCH_SAMPLES" --label=${{ matrix.label }} "$BENCH_QUICK_FLAG" "$BENCH_DIAGNOSTIC_FLAG"
           else
-            node bench/clipboard-writer/launch.mjs --fixture=rgb-2k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+            node bench/clipboard-writer/launch.mjs --fixture=rgb-2k --samples="$BENCH_SAMPLES" --label=${{ matrix.label }} "$BENCH_QUICK_FLAG" "$BENCH_DIAGNOSTIC_FLAG"
           fi
       - name: Fresh-process opaque RGB 4096 memory controls
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !inputs.diagnostic }}
         timeout-minutes: 5
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=rgb-4k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=rgb-4k --samples="$BENCH_SAMPLES" --label=${{ matrix.label }}
           else
-            node bench/clipboard-writer/launch.mjs --fixture=rgb-4k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+            node bench/clipboard-writer/launch.mjs --fixture=rgb-4k --samples="$BENCH_SAMPLES" --label=${{ matrix.label }}
           fi
       - name: Transparent RGB and alpha controls
         if: ${{ !cancelled() }}
@@ -78,12 +85,12 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=transparent --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=transparent --samples="$BENCH_SAMPLES" --label=${{ matrix.label }} "$BENCH_QUICK_FLAG" "$BENCH_DIAGNOSTIC_FLAG"
           else
-            node bench/clipboard-writer/launch.mjs --fixture=transparent --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+            node bench/clipboard-writer/launch.mjs --fixture=transparent --samples="$BENCH_SAMPLES" --label=${{ matrix.label }} "$BENCH_QUICK_FLAG" "$BENCH_DIAGNOSTIC_FLAG"
           fi
       - name: Local path with Retina siblings
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !inputs.diagnostic }}
         timeout-minutes: 5
         shell: bash
         run: |
@@ -93,7 +100,7 @@ jobs:
             node bench/clipboard-writer/launch.mjs --fixture=retina-siblings --samples=${{ matrix.samples }} --label=${{ matrix.label }}
           fi
       - name: Local path with explicit 2x scale suffix
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !inputs.diagnostic }}
         timeout-minutes: 5
         shell: bash
         run: |
@@ -103,7 +110,7 @@ jobs:
             node bench/clipboard-writer/launch.mjs --fixture=retina-2x --samples=${{ matrix.samples }} --label=${{ matrix.label }}
           fi
       - name: Validate all native evidence and retain partial reports
-        if: ${{ always() }}
+        if: ${{ always() && !inputs.diagnostic }}
         timeout-minutes: 5
         run: node bench/clipboard-writer/summarize.mjs --label=${{ matrix.label }} --revision=${{ github.sha }}
       - name: Remove owned Mac read-only observer executable

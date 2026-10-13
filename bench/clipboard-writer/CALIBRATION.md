@@ -76,3 +76,27 @@ Version-pinned sources:
 - [Electron dependency versions](https://github.com/electron/electron/blob/v39.8.3/DEPS)
 - [Chromium Mac bitmap writer and PNG/TIFF fallback](https://github.com/chromium/chromium/blob/142.0.7444.265/ui/base/clipboard/clipboard_mac.mm#L640)
 - [Electron NativeImage path/scale loader](https://github.com/electron/electron/blob/v39.8.3/shell/common/skia_util.cc#L135)
+
+Mac native-format diagnosis retains the ordinary strict source and API-readback controls.
+Before their assertions, checkpoints contain PNG and TIFF declarations, ordinary decoded
+RGBA, encoded digests, ICC/PNG color metadata, per-channel deltas, and bounded examples.
+The separate `ignoredIccDiagnostic` decode only tests whether ICC interpretation explains
+a delta; it is not an acceptance input or a replacement for ordinary color-managed decode.
+Swift's bitmap metadata inspection remains read-only and outside the writer interval.
+
+For a small diagnostic rerun, use `--quick --samples=1 --diagnostic-native-formats` with
+`--fixture=rgb-2k` or `--fixture=transparent`. Mac stages then retain generated native PNG,
+TIFF, prepared PNG and API-readback PNG under `diagnostics/native-formats/`, with their
+lengths and SHA256 values in the checkpoint. Retention requires quick inputs at most 256px
+per edge and bounds each encoded file to one MiB; full original-size fixtures are not
+retained. A failing baseline stays partial and cannot establish candidate adoption.
+
+The workflow is dispatched explicitly. `diagnostic=true` runs only quick RGB/alpha stages
+with one sample and preserves bounded raw evidence; it skips the full-adoption summary.
+`diagnostic=false` runs all five full-size stages and validates every expected report.
+
+Native control messages use a nonce-authenticated ephemeral loopback TCP connection,
+separate from startup stdout/stderr. Electron 39.8.3 replaces Windows `process.stdin`
+with an always-EOF stream, so stdin cannot carry this disposable probe's handshake.
+Terminal messages are flushed before process exit. This transport is outside writeMs
+and adds no product IPC, server or dependency.
