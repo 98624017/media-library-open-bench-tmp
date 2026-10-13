@@ -24,7 +24,20 @@ export function assetJson(localPath, index) {
   }
 }
 
+/** 53-bit non-cryptographic hash; collisions only add candidates that SQL re-verifies. */
+function hashKey(value) {
+  let a = 0x811c9dc5
+  let b = 0x01000193
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    a = Math.imul(a ^ code, 0x01000193)
+    b = Math.imul(b + code, 0x85ebca6b) ^ (b >>> 13)
+  }
+  return (a >>> 0) * 0x200000 + ((b >>> 0) >>> 11)
+}
+
 export function openRecords(file, { fold }) {
+  let memoryIndex = new Map()
   const db = new DatabaseSync(file)
   db.exec('PRAGMA journal_mode=WAL')
   const pathKey = makePathKey(fold)
@@ -113,6 +126,59 @@ export function openRecords(file, { fold }) {
            ORDER BY h.created_at DESC, h.id ASC, p.asset_idx ASC`
         )
         .all(...keys)
+      return reconcile(paths, rows, io)
+    },
+    /**
+     * Candidate without schema change: an in-memory hash of path identity to row ids, built by
+     * one scan and reused until the connection observes a write.
+     */
+    buildMemoryIndex() {
+      const start = performance.now()
+      const before = process.memoryUsage().heapUsed
+      const index = new Map()
+      const rows = db
+        .prepare(
+          `SELECT h.rowid AS rid, ${expression} AS p
+           FROM records h
+           JOIN json_each(CASE WHEN json_valid(h.assets_json) THEN h.assets_json ELSE '[]' END) asset
+           WHERE ${expression} IS NOT NULL`
+        )
+        .iterate()
+      for (const row of rows) {
+        const hash = hashKey(pathKey(row.p))
+        const current = index.get(hash)
+        if (current === undefined) index.set(hash, row.rid)
+        else if (typeof current === 'number') {
+          if (current !== row.rid) index.set(hash, [current, row.rid])
+        } else if (!current.includes(row.rid)) current.push(row.rid)
+      }
+      memoryIndex = index
+      return {
+        ms: performance.now() - start,
+        heapMb: (process.memoryUsage().heapUsed - before) / 1048576,
+        entries: index.size
+      }
+    },
+    findByMemoryIndex(paths, io) {
+      const keys = [...new Set(paths.map(pathKey))]
+      const rowIds = new Set()
+      for (const key of keys) {
+        const hit = memoryIndex.get(hashKey(key))
+        if (hit === undefined) continue
+        if (typeof hit === 'number') rowIds.add(hit)
+        else for (const id of hit) rowIds.add(id)
+      }
+      if (rowIds.size === 0) return reconcile(paths, [], io)
+      const rows = db
+        .prepare(
+          `SELECT h.*, asset.value AS result_asset_json
+           FROM records h
+           JOIN json_each(CASE WHEN json_valid(h.assets_json) THEN h.assets_json ELSE '[]' END) asset
+           WHERE h.rowid IN (SELECT value FROM json_each(?))
+             AND ${matching} IN (SELECT value FROM json_each(?))
+           ORDER BY h.created_at DESC, h.id ASC, CAST(asset.key AS INTEGER) ASC`
+        )
+        .all(JSON.stringify([...rowIds]), JSON.stringify(keys))
       return reconcile(paths, rows, io)
     },
     close() {

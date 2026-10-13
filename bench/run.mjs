@@ -5,7 +5,7 @@ import os from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createIo, summarizeIo } from './io.mjs'
-import { GROUP_FOLDERS, listBaseline, listLean, listProjectExports } from './listing.mjs'
+import { GROUP_FOLDERS, listBaseline, listLean, listProjectExports, listTight } from './listing.mjs'
 import { assetJson, openRecords } from './records.mjs'
 import { measureColdLoad, measureThumbnails } from './thumbs.mjs'
 
@@ -17,7 +17,7 @@ const enabled = (part) => !only || only.includes(part)
 const isWin = process.platform === 'win32'
 const round = (value) => Math.round(value * 10) / 10
 const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
-const SAMPLE_CAP_MS = 45_000
+const SAMPLE_CAP_MS = 8_000
 
 /** `name=path;name=path`; defaults to the OS temp directory. */
 const roots = (process.env.BENCH_ROOTS ?? `local=${os.tmpdir()}`)
@@ -118,10 +118,18 @@ async function microCosts(base) {
   }
 }
 
-async function listingGrid(base) {
+async function listingGrid(base, reduced) {
   const grid = quick
     ? [{ dates: 30, projects: 0 }, { dates: 60, projects: 5 }]
-    : [
+    : reduced
+      ? [
+          { dates: 30, projects: 10 },
+          { dates: 365, projects: 0 },
+          { dates: 365, projects: 10 },
+          { dates: 365, projects: 50 },
+          { dates: 180, filesPerDate: 20, projects: 10 }
+        ]
+      : [
         { dates: 30, projects: 0 },
         { dates: 30, projects: 10 },
         { dates: 365, projects: 0 },
@@ -149,7 +157,9 @@ async function listingGrid(base) {
         return { ...result, io: summarizeIo(io), total: result.last.total, digest: result.last.pathsDigest }
       }
       const baseline = await measure(listBaseline)
+      const tight = await measure(listTight)
       const lean = await measure(listLean)
+      if (baseline.digest !== tight.digest) throw new Error(`Tight listing disagrees for ${JSON.stringify(shape)}`)
       if (baseline.total !== lean.total || baseline.digest !== lean.digest)
         throw new Error(`Listing variants disagree for ${JSON.stringify(shape)}`)
       if (baseline.total !== lib.files.length)
@@ -163,6 +173,11 @@ async function listingGrid(base) {
         baselineBlockedMs: baseline.io.blockedMs,
         baselineSyncCalls: baseline.io.syncCalls,
         baselineAsyncCalls: baseline.io.asyncCalls,
+        tightFirstMs: tight.firstMs,
+        tightMedianMs: tight.medianMs,
+        tightBlockedMs: tight.io.blockedMs,
+        tightSyncCalls: tight.io.syncCalls,
+        tightAsyncCalls: tight.io.asyncCalls,
         leanFirstMs: lean.firstMs,
         leanMedianMs: lean.medianMs,
         leanSyncCalls: lean.io.syncCalls,
@@ -221,6 +236,8 @@ async function recordLookup(base) {
       folded.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
       const sizeAfter = fs.statSync(file).size
       const indexed = await time(() => folded.findByIndex(lib.files))
+      const memory = folded.buildMemoryIndex()
+      const memoryLookup = await time(() => folded.findByMemoryIndex(lib.files))
       rows.push({
         records: count,
         assets: count * assetsPerRecord,
@@ -231,7 +248,10 @@ async function recordLookup(base) {
         indexBuildMs: round(buildMs),
         indexExtraMb: round((sizeAfter - sizeBefore) / 1048576),
         indexedFirstMs: indexed.firstMs,
-        indexedMedianMs: indexed.medianMs
+        indexedMedianMs: indexed.medianMs,
+        memoryBuildMs: round(memory.ms),
+        memoryHeapMb: round(memory.heapMb),
+        memoryLookupMedianMs: memoryLookup.medianMs
       })
       console.log('records', JSON.stringify(rows.at(-1)))
       plain.close()
@@ -243,16 +263,17 @@ async function recordLookup(base) {
   return rows
 }
 
-async function profiles(base) {
-  const shapes = quick
+async function profiles(base, reduced) {
+  const shapes = (quick
     ? [{ name: 'new-user', dates: 1 }, { name: 'small', dates: 20, filesPerDate: 4, projects: 3, unrelated: [500, 4] }]
     : [
         { name: 'new-user (2 files)', dates: 1 },
         { name: 'cleaned 1y (2 files left)', dates: 365, emptyGroupFolder: true, projects: 10, unrelated: [5000, 4] },
         { name: 'cleaned 3y + projects (2 files left)', dates: 1000, emptyGroupFolder: true, projects: 50, unrelated: [20000, 4] },
         { name: 'active 6mo (3.6k files)', dates: 180, filesPerDate: 20, projects: 10 },
-        { name: 'heavy 2y (21k files)', dates: 700, filesPerDate: 30, projects: 30 }
+        { name: 'heavy 2y (21k files)', dates: 700, filesPerDate: 30, projects: 30, heavy: true }
       ]
+  ).filter((shape) => !(reduced && shape.heavy))
   const rows = []
   for (const shape of shapes) {
     const lib = await buildLibrary(base, { projects: 0, ...shape })
@@ -278,20 +299,32 @@ async function profiles(base) {
         const startProjects = performance.now()
         const extra = await listProjectExports(lib.projectRoots, io, { parallel: variant === 'baseline' ? 1 : 8 })
         const projectsMs = performance.now() - startProjects
+        // The in-memory index is rebuilt once per listing: the worst case after a write.
+        let memoryReady = false
         const associate = (paths) => {
           const start = performance.now()
-          const matches = variant === 'baseline' ? records.findByScan(paths, io) : records.findByIndex(paths, io)
+          if (variant === 'tight' && !memoryReady) {
+            records.buildMemoryIndex()
+            memoryReady = true
+          }
+          const matches =
+            variant === 'baseline'
+              ? records.findByScan(paths, io)
+              : variant === 'tight'
+                ? records.findByMemoryIndex(paths, io)
+                : records.findByIndex(paths, io)
           const elapsed = performance.now() - start
           associationMs += elapsed
           io.blocked(elapsed)
           return matches
         }
-        const result = await (variant === 'baseline' ? listBaseline : listLean)(lib.output, extra, io, { associate, timings })
+        const list = variant === 'baseline' ? listBaseline : variant === 'tight' ? listTight : listLean
+        const result = await list(lib.output, extra, io, { associate, timings })
         if (result.page.some((entry) => !entry.recordId)) throw new Error('Unassociated entry on first page')
         return { result, projectsMs, associationMs, finishMs: timings.finishMs, io: summarizeIo(io) }
       }
       const measured = {}
-      for (const variant of ['baseline', 'candidate']) {
+      for (const variant of ['baseline', 'tight', 'candidate']) {
         const result = await sample(run(variant))
         const stages = result.last
         measured[variant] = {
@@ -307,7 +340,7 @@ async function profiles(base) {
           digest: stages.result.pathsDigest
         }
       }
-      if (measured.baseline.digest !== measured.candidate.digest || measured.baseline.total !== lib.files.length)
+      if (measured.baseline.digest !== measured.tight.digest || measured.baseline.digest !== measured.candidate.digest || measured.baseline.total !== lib.files.length)
         throw new Error(`Profile variants disagree: ${shape.name}`)
       rows.push({ profile: shape.name, files: lib.files.length, indexBuildMs: round(indexBuildMs), ...flatten(measured) })
       console.log('profile', JSON.stringify(rows.at(-1)))
@@ -327,6 +360,17 @@ function flatten(measured) {
     }
   }
   return out
+}
+
+/** How a mapped network drive is reported by realpath: decides whether stored paths still match. */
+function probeMapped() {
+  const mapped = process.env.BENCH_MAPPED
+  if (!mapped) return null
+  try {
+    return { input: mapped, native: fs.realpathSync.native(mapped), js: fs.realpathSync(mapped) }
+  } catch (error) {
+    return { input: mapped, error: String(error.code ?? error.message) }
+  }
 }
 
 function environment() {
@@ -352,7 +396,8 @@ function environment() {
     defender: powershell(
       'Get-MpComputerStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,OnAccessProtectionEnabled,IoavProtectionEnabled | ConvertTo-Json -Compress'
     ),
-    defenderExclusions: powershell('(Get-MpPreference).ExclusionPath -join ";"')
+    defenderExclusions: powershell('(Get-MpPreference).ExclusionPath -join ";"'),
+    mappedDriveRealpath: probeMapped()
   }
 }
 
@@ -368,15 +413,22 @@ function table(rows) {
 
 const report = { env: environment(), roots: {} }
 console.log('env', JSON.stringify(report.env))
+const save = async () => {
+  await fsp.mkdir('results', { recursive: true })
+  await fsp.writeFile(join('results', `${label}.json`), JSON.stringify(report, null, 2))
+}
 for (const root of roots) {
   await fsp.mkdir(root.base, { recursive: true })
   const section = {}
+  const reduced = root.name !== 'local'
+  report.roots[root.name] = section
   console.log(`--- root ${root.name}: ${root.base}`)
   if (enabled('micro')) section.microUsPerCall = await microCosts(root.base)
   if (enabled('micro')) console.log('micro', JSON.stringify(section.microUsPerCall))
-  if (enabled('listing')) section.listing = await listingGrid(root.base)
-  if (enabled('profiles')) section.profiles = await profiles(root.base)
-  report.roots[root.name] = section
+  if (enabled('listing')) section.listing = await listingGrid(root.base, reduced)
+  await save()
+  if (enabled('profiles')) section.profiles = await profiles(root.base, reduced)
+  await save()
 }
 if (enabled('records')) report.records = await recordLookup(roots[0].base)
 if (enabled('thumbs')) {

@@ -295,3 +295,136 @@ export async function listProjectExports(projectRoots, io, { parallel = 1 } = {}
   }
   return results
 }
+
+/**
+ * Tight: keeps every per-directory and per-file safety check of the baseline, but resolves the
+ * trusted anchors (root, registered directories) once per listing and reuses the canonical path
+ * each check has just produced instead of resolving it again.
+ */
+export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 48, timings } = {}) {
+  const fold = (value) => (isWin ? value.toLowerCase() : value)
+  const resolveAnchor = (value) => {
+    const resolved = resolve(value)
+    return io.existsSync(resolved) ? normalize(io.realpathSyncNative(resolved)) : normalize(resolved)
+  }
+  const inside = (parent, target) => {
+    const rel = relative(fold(parent), fold(target))
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  }
+  const rootPath = await io.realpath(resolve(rootDir))
+  const extras = extraDirs.map((extra) => ({ ...extra, resolved: resolveAnchor(extra.path), key: pathKey(extra.path) }))
+  const extraKeys = new Set(extras.map((extra) => extra.key))
+  const parts = (target) => {
+    if (!inside(rootPath, target)) return null
+    const value = relative(rootPath, target)
+    if (!value) return []
+    const split = value.split(/[\\/]/)
+    return split.some((part) => !part || part === '.' || part === '..') ? null : split
+  }
+  const allowedDirectory = (dir) => {
+    if (extraKeys.has(pathKey(dir))) return true
+    const p = parts(dir)
+    if (!p) return false
+    if (p.length === 0) return true
+    if (p.length === 1) return DATE_RE.test(p[0]) || p[0] === EXPORT_DIR
+    if (p.length === 2 && DATE_RE.test(p[0])) return groupFolder(p[1])
+    return false
+  }
+  const resolveDirectory = async (requested) => {
+    let current = resolve(requested)
+    if ((await io.lstat(current)).isSymbolicLink()) throw new Error('symlink')
+    current = await io.realpath(current)
+    if (!allowedDirectory(current)) throw new Error(`denied ${current}`)
+    if (!(await io.stat(current)).isDirectory()) throw new Error('not a directory')
+    return current
+  }
+  const validateFile = async (absolute) => {
+    // Fresh evidence for the target itself; anchors are already canonical.
+    const real = normalize(io.realpathSyncNative(absolute))
+    if (!inside(rootPath, real) && !extras.some((extra) => inside(extra.resolved, real))) throw new Error('denied')
+    if (!visibleFile(basename(real)) || !allowedDirectory(dirname(real))) throw new Error('denied')
+    if (!(await io.stat(real)).isFile()) throw new Error('not a file')
+    return real
+  }
+  const entryFromPath = async (filePath, name = basename(filePath)) => {
+    const info = await io.lstat(filePath)
+    if (info.isSymbolicLink()) return null
+    const directory = info.isDirectory()
+    return {
+      path: directory ? filePath : await validateFile(resolve(filePath)),
+      name,
+      directory,
+      size: directory ? 0 : info.size,
+      modifiedAt: info.mtimeMs
+    }
+  }
+  const readEntries = async (current) => {
+    const p = parts(current) ?? []
+    const dirents = await io.readdir(current, { withFileTypes: true })
+    const candidates = []
+    const extraOwner = extraKeys.has(pathKey(current))
+    if (p.length === 0 && !extraOwner) {
+      for (const dirent of dirents) {
+        if (!dirent.isDirectory() || dirent.isSymbolicLink()) continue
+        if (DATE_RE.test(dirent.name) || dirent.name === EXPORT_DIR) candidates.push({ path: join(current, dirent.name) })
+      }
+      for (const extra of extras) {
+        if (inside(rootPath, extra.resolved) && basename(extra.path) === EXPORT_DIR) continue
+        candidates.push({ path: extra.path, name: extra.label })
+      }
+    } else {
+      const inDate = !extraOwner && p.length === 1 && DATE_RE.test(p[0])
+      for (const dirent of dirents) {
+        if (dirent.isSymbolicLink()) continue
+        const entryPath = join(current, dirent.name)
+        if (dirent.isFile()) {
+          if (visibleFile(dirent.name)) candidates.push({ path: entryPath })
+        } else if (dirent.isDirectory() && inDate && groupFolder(dirent.name)) {
+          candidates.push({ path: entryPath })
+        }
+      }
+      if (inDate) {
+        for (const extra of extras) {
+          if (inside(current, extra.resolved)) candidates.push({ path: extra.path, name: extra.label })
+        }
+      }
+    }
+    const results = []
+    for (let offset = 0; offset < candidates.length; offset += READ_BATCH) {
+      const batch = await Promise.all(
+        candidates.slice(offset, offset + READ_BATCH).map((candidate) => entryFromPath(candidate.path, candidate.name))
+      )
+      results.push(...batch.filter(Boolean))
+    }
+    return results
+  }
+  const visited = new Set()
+  const discovered = []
+  const discover = async (directory, known) => {
+    const current = known ?? (await resolveDirectory(directory))
+    const key = pathKey(current)
+    if (visited.has(key)) return
+    visited.add(key)
+    for (const entry of await readEntries(current)) {
+      if (entry.directory) await discover(entry.path)
+      else discovered.push(entry)
+    }
+  }
+  if (!(await io.stat(rootPath)).isDirectory()) throw new Error('not a directory')
+  await discover(rootPath, rootPath)
+  const unique = new Map()
+  for (const entry of discovered) if (!unique.has(pathKey(entry.path))) unique.set(pathKey(entry.path), entry)
+  let entries = [...unique.values()]
+  if (associate) {
+    const matches = new Map()
+    for (let offset = 0; offset < entries.length; offset += ASSOCIATION_BATCH) {
+      const paths = entries.slice(offset, offset + ASSOCIATION_BATCH).map((entry) => entry.path)
+      for (const match of associate(paths)) if (!matches.has(pathKey(match.path))) matches.set(pathKey(match.path), match)
+    }
+    entries = entries.map((entry) => {
+      const match = matches.get(pathKey(entry.path))
+      return match ? { ...entry, createdAt: match.createdAt, recordId: match.recordId } : entry
+    })
+  }
+  return finish(entries, rootPath, pageSize, true, timings)
+}

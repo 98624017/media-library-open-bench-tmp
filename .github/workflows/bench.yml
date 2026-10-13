@@ -50,6 +50,8 @@ jobs:
           try {
             New-SmbShare -Name benchshare -Path $base -FullAccess Everyone -ErrorAction Stop | Out-Null
             if (Test-Path '\\localhost\benchshare') { $roots += ';unc=\\localhost\benchshare' }
+            net use Z: \\localhost\benchshare /persistent:no
+            if (Test-Path 'Z:\') { "BENCH_MAPPED=Z:\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
           } catch { Write-Host "share unavailable: $_" }
           "BENCH_ROOTS=$roots" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Get-Volume -DriveLetter C | Format-List DriveLetter, FileSystem, DriveType, Size
