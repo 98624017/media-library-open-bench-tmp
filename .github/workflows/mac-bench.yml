@@ -84,7 +84,7 @@ jobs:
           apfs = plistlib.loads(pathlib.Path('results/apfs-sensitive-disk.plist').read_bytes())
           hfs = plistlib.loads(pathlib.Path('results/hfs-disk.plist').read_bytes())
           assert apfs.get('FilesystemType') == 'apfs', apfs
-          assert 'case-sensitive' in apfs.get('FileSystemPersonality', '').lower(), apfs
+          assert 'case-sensitive' in apfs.get('FilesystemName', '').lower(), apfs
           assert hfs.get('FilesystemType') == 'hfs', hfs
           PY
           df -h "$bench_mount_dir/local" "$bench_mount_dir/apfs-sensitive" "$bench_mount_dir/hfs" > results/disk-space.txt
