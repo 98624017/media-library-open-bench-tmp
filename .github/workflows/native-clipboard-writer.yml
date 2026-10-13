@@ -1,0 +1,118 @@
+name: one-shot-native-clipboard-writer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [native-clipboard-writer-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: macos-15-arm64, runner: macos-15, arch: arm64, samples: 7 }
+          - { label: macos-15-intel-x64, runner: macos-15-intel, arch: x64, samples: 7 }
+          - { label: windows-2025-x64, runner: windows-2025, arch: x64, samples: 3 }
+          - { label: ubuntu-24-control, runner: ubuntu-24.04, arch: x64, samples: 3 }
+    env:
+      BENCH_SOURCE_REVISION: ${{ github.sha }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      BENCH_MAC_CLIPBOARD_READER: ${{ runner.temp }}/clipboard-format-reader-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: actions/setup-node@v4
+        timeout-minutes: 5
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        timeout-minutes: 5
+        with:
+          python-version: '3.12'
+      - name: Install locked generated-fixture dependencies
+        timeout-minutes: 5
+        run: npm ci --no-audit --no-fund
+      - name: Architecture and completeness self-checks
+        timeout-minutes: 5
+        run: |
+          node -e "require('node:assert/strict').equal(process.arch,process.env.EXPECTED_ARCH)"
+          node --test bench/clipboard-writer/validation.test.mjs
+      - name: Compile read-only Mac native format observer
+        if: ${{ runner.os == 'macOS' }}
+        timeout-minutes: 5
+        run: |
+          swiftc --version
+          node --input-type=module -e "import {execFileSync} from 'node:child_process'; execFileSync('swiftc',['bench/clipboard-writer/read-mac.swift','-o',process.env.BENCH_MAC_CLIPBOARD_READER],{timeout:275000,killSignal:'SIGKILL',stdio:'inherit'})"
+      - name: Fresh-process opaque RGB 2048 controls
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=rgb-2k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          else
+            node bench/clipboard-writer/launch.mjs --fixture=rgb-2k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          fi
+      - name: Fresh-process opaque RGB 4096 memory controls
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=rgb-4k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          else
+            node bench/clipboard-writer/launch.mjs --fixture=rgb-4k --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          fi
+      - name: Transparent RGB and alpha controls
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=transparent --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          else
+            node bench/clipboard-writer/launch.mjs --fixture=transparent --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          fi
+      - name: Local path with Retina siblings
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=retina-siblings --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          else
+            node bench/clipboard-writer/launch.mjs --fixture=retina-siblings --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          fi
+      - name: Local path with explicit 2x scale suffix
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run --auto-servernum node bench/clipboard-writer/launch.mjs --fixture=retina-2x --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          else
+            node bench/clipboard-writer/launch.mjs --fixture=retina-2x --samples=${{ matrix.samples }} --label=${{ matrix.label }}
+          fi
+      - name: Validate all native evidence and retain partial reports
+        if: ${{ always() }}
+        timeout-minutes: 5
+        run: node bench/clipboard-writer/summarize.mjs --label=${{ matrix.label }} --revision=${{ github.sha }}
+      - name: Remove owned Mac read-only observer executable
+        if: ${{ always() && runner.os == 'macOS' }}
+        timeout-minutes: 5
+        run: node --input-type=module -e "import {rm} from 'node:fs/promises'; await rm(process.env.BENCH_MAC_CLIPBOARD_READER,{force:true})"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        timeout-minutes: 5
+        with:
+          name: clipboard-writer-evidence-${{ matrix.label }}
+          path: results
+          if-no-files-found: error
+          retention-days: 30

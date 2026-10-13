@@ -76,7 +76,7 @@ async function readOwnedGroups(directory, nonce) {
   return groups
 }
 
-async function stopTree(pid, timeoutMs) {
+export async function stopTree(pid, timeoutMs) {
   assert(validPid(pid))
   assert(timeoutMs >= 1, 'Process tree cleanup deadline exceeded')
   if (process.platform === 'win32') {
