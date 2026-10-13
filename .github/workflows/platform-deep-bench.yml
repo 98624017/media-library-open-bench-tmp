@@ -1,0 +1,161 @@
+name: one-shot-platform-deep-bench
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [platform-deep-bench]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: windows-2022-x64, runner: windows-2022, arch: x64 }
+          - { label: windows-2025-x64, runner: windows-2025, arch: x64 }
+          - { label: macos-15-arm64, runner: macos-15, arch: arm64 }
+          - { label: macos-15-intel-x64, runner: macos-15-intel, arch: x64 }
+          - { label: ubuntu-24-control, runner: ubuntu-24.04, arch: x64 }
+    env:
+      BENCH_LABEL: ${{ matrix.label }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      BENCH_SOURCE_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: actions/setup-node@v4
+        timeout-minutes: 5
+        with:
+          node-version: 22
+      - name: Install locked synthetic dependencies
+        timeout-minutes: 5
+        run: npm ci --no-audit --no-fund
+      - name: Assert runtime and measurement self-checks
+        timeout-minutes: 5
+        run: |
+          node -e "require('node:assert/strict').equal(process.arch,process.env.EXPECTED_ARCH)"
+          npm run test:platform
+
+      - name: Record Windows disk and protection state
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          New-Item -ItemType Directory -Force results | Out-Null
+          Get-Volume | Select-Object DriveLetter,FileSystem,DriveType,Size | ConvertTo-Json | Set-Content -Encoding utf8 results/windows-volumes.json
+          Get-MpComputerStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled | ConvertTo-Json | Set-Content -Encoding utf8 results/windows-protection.json
+          $benchShareRoot = Join-Path $env:RUNNER_TEMP ('platform-share-' + [guid]::NewGuid())
+          New-Item -ItemType Directory $benchShareRoot | Out-Null
+          $benchUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          New-SmbShare -Name platformbench -Path $benchShareRoot -FullAccess $benchUser -ErrorAction Stop | Out-Null
+          if (-not (Test-Path '\\localhost\platformbench')) { throw 'Loopback SMB fixture is unavailable' }
+          'BENCH_UNC_ROOT=\\localhost\platformbench' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BENCH_SHARE_ROOT=$benchShareRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Create disposable Mac HFS volume
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          bench_hfs_dir=$(mktemp -d "$RUNNER_TEMP/platform-hfs.XXXXXX")
+          printf '%s\n' "BENCH_HFS_DIR=$bench_hfs_dir" >> "$GITHUB_ENV"
+          mkdir "$bench_hfs_dir/mount"
+          hdiutil create -size 2g -type SPARSE -fs HFS+ -volname PlatformHfs "$bench_hfs_dir/fixture.sparseimage"
+          hdiutil attach -nobrowse -noautoopen -mountpoint "$bench_hfs_dir/mount" "$bench_hfs_dir/fixture.sparseimage"
+          diskutil info -plist "$bench_hfs_dir/mount" > results/hfs-disk.plist
+          sw_vers > results/macos-version.txt
+          printf '%s\n' "BENCH_HFS_ROOT=$bench_hfs_dir/mount" >> "$GITHUB_ENV"
+
+      - name: File save import and migration
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=file-io --label=${{ matrix.label }}
+      - name: SQLite and durable files
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=persistence --label=${{ matrix.label }}
+      - name: Image processing cache disabled
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=images --cache=disabled --label=${{ matrix.label }}
+      - name: Image processing default cache
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=images --cache=default --label=${{ matrix.label }}
+      - name: Image processing cache without file slots
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=images --cache=fileless --label=${{ matrix.label }}
+
+      - name: Native Electron cache-disabled file operations
+        if: ${{ !cancelled() && runner.os != 'Linux' }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=native-cache --cache=disabled --label=${{ matrix.label }}
+      - name: Native Electron default-cache file operations
+        if: ${{ !cancelled() && runner.os != 'Linux' }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=native-cache --cache=default --label=${{ matrix.label }}
+      - name: Native Electron fileless-cache file operations
+        if: ${{ !cancelled() && runner.os != 'Linux' }}
+        timeout-minutes: 5
+        run: node bench/platform/launch.mjs --suite=native-cache --cache=fileless --label=${{ matrix.label }}
+
+      - name: Windows loopback SMB file I/O
+        if: ${{ !cancelled() && runner.os == 'Windows' && env.BENCH_UNC_ROOT != '' }}
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $env:BENCH_BASE_ROOT = $env:BENCH_UNC_ROOT
+          node bench/platform/launch.mjs --suite=file-io --quick --samples=3 --label=${{ matrix.label }}-unc
+      - name: Mac HFS file I/O
+        if: ${{ !cancelled() && runner.os == 'macOS' && env.BENCH_HFS_ROOT != '' }}
+        timeout-minutes: 5
+        env:
+          BENCH_BASE_ROOT: ${{ env.BENCH_HFS_ROOT }}
+        run: node bench/platform/launch.mjs --suite=file-io --quick --samples=3 --label=${{ matrix.label }}-hfs
+      - name: Mac HFS durable files
+        if: ${{ !cancelled() && runner.os == 'macOS' && env.BENCH_HFS_ROOT != '' }}
+        timeout-minutes: 5
+        env:
+          BENCH_BASE_ROOT: ${{ env.BENCH_HFS_ROOT }}
+        run: node bench/platform/launch.mjs --suite=persistence --quick --samples=3 --label=${{ matrix.label }}-hfs
+
+      - name: Assemble and validate saved evidence
+        if: ${{ always() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          node bench/platform/summarize.mjs results --label=${{ matrix.label }} --platform=${{ runner.os }}
+          cat results/platform-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        timeout-minutes: 5
+        with:
+          name: platform-evidence-${{ matrix.label }}
+          path: results
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Detach owned Mac disk image
+        if: ${{ always() && runner.os == 'macOS' && env.BENCH_HFS_DIR != '' }}
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          hdiutil detach "$BENCH_HFS_DIR/mount"
+          node --input-type=module -e 'import {rm} from "node:fs/promises";import assert from "node:assert/strict";const p=process.env.BENCH_HFS_DIR;assert(p.startsWith(process.env.RUNNER_TEMP+"/platform-hfs."));await rm(p,{recursive:true,force:true});'
+      - name: Remove owned Windows share
+        if: ${{ always() && runner.os == 'Windows' && env.BENCH_SHARE_ROOT != '' }}
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          Remove-SmbShare -Name platformbench -Force -ErrorAction Stop
+          node --input-type=module -e 'import {rm} from "node:fs/promises";import assert from "node:assert/strict";import {join} from "node:path";const p=process.env.BENCH_SHARE_ROOT;assert(p.startsWith(join(process.env.RUNNER_TEMP,"platform-share-")));await rm(p,{recursive:true,force:true});'

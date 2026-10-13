@@ -4,9 +4,14 @@
   "type": "module",
   "description": "Synthetic benchmark: opening a media library listing on different operating systems.",
   "scripts": {
-    "bench": "node bench/run.mjs"
+    "bench": "node bench/run.mjs",
+    "bench:platform": "node bench/platform/run.mjs",
+    "test:platform": "node --test bench/platform/*.test.mjs"
   },
   "dependencies": {
     "sharp": "0.34.5"
+  },
+  "devDependencies": {
+    "electron": "39.8.3"
   }
 }
