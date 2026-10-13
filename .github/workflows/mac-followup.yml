@@ -18,7 +18,13 @@ jobs:
       matrix:
         include:
           - { label: macos-26-arm64-followup, os: macos-26, arch: arm64, records: true }
-          - { label: macos-15-intel-x64-followup, os: macos-15-intel, arch: x64, records: true, secondary: true }
+          - {
+              label: macos-15-intel-x64-followup,
+              os: macos-15-intel,
+              arch: x64,
+              records: true,
+              secondary: true
+            }
           - { label: macos-15-arm64-sharp-repeat, os: macos-15, arch: arm64, sharp_repeat: true }
     env:
       BENCH_LABEL: ${{ matrix.label }}
