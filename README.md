@@ -155,3 +155,44 @@ observed default state; the investigation did not modify it.
 Workflow summaries require all 5 Linux, 9 Windows or 10 Mac reports, including the
 extra-volume probes. Missing reports and failed disabled-cache controls remain partial;
 observed failures of candidate cache policies do not invalidate the control measurements.
+
+## One-shot batches 2 and 3
+
+The separate `platform-batch23-bench` branch/workflow investigates six more mechanisms:
+software video encoding and child termination; EXIF/alpha/crop/composite/PSD work;
+long journal growth and replay; actual Electron IPC/clipboard; loopback proxy/PAC/body
+lifetime; and generic CLI handshake/single-instance/restart primitives. It runs only on
+an intentional push to that branch or workflow dispatch. It is not routine product CI.
+
+```bash
+npm ci --no-audit --no-fund
+npm run test:extended
+node bench/extended/launch.mjs --suite=video --quick --label=smoke
+node bench/extended/launch.mjs --suite=image-chain --quick --label=smoke
+node bench/extended/launch.mjs --suite=journal-growth --quick --label=smoke
+xvfb-run --auto-servernum node bench/extended/launch.mjs --suite=ipc --quick --label=smoke
+xvfb-run --auto-servernum node bench/extended/launch.mjs --suite=network --quick --label=smoke
+xvfb-run --auto-servernum node bench/extended/launch.mjs --suite=lifecycle --quick --label=smoke
+```
+
+The Xvfb prefix is for Linux only. Windows/macOS run the same commands without it.
+Native suites use isolated Electron 39.8.3 user data. Image work uses Sharp 0.34.5 and
+ag-psd 31.0.1, with Windows cache disabled. Video encodes use ffmpeg-static 5.3.0;
+the native FFprobe installer and actual tool versions are recorded. The generic Rust
+client is compiled by the runner's Rust toolchain before measurement. No product source,
+customer data, secrets or paid API calls enter these public scripts.
+
+Each suite has three full-workload samples and immediate progress checkpoints. Completed
+profiles, source revision, native platform/architecture, cleanup and report errors are
+validated; absent or invalid reports remain partial evidence. Unsupported clipboard
+facilities and deliberately observed library/process behavior remain explicit observations.
+The six `*-calibration.md` files and the suite summaries describe operation boundaries.
+
+IPC ends after decoded pixels are available, with real contextBridge copying. Renderer
+memory snapshots and child-process metrics have explicit scopes. Network traffic uses
+only generated loopback origins/proxies and a configured PAC, not host OS proxy settings.
+The standard-library Rust helper is a synthetic query client, not the product CLI.
+The app's startup timing covers the small harness only. Hardware video encoding, product
+UI/GPU/input latency, sleep/wake, installation/updating, actual NAS and power loss are
+outside this investigation. Linux's special development Sharp version and product
+development/test/package workflows remain unchanged.

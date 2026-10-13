@@ -1,0 +1,107 @@
+name: one-shot-platform-batches-2-and-3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [platform-batch23-bench]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: windows-2022-x64, runner: windows-2022, arch: x64 }
+          - { label: windows-2025-x64, runner: windows-2025, arch: x64 }
+          - { label: macos-15-arm64, runner: macos-15, arch: arm64 }
+          - { label: macos-15-intel-x64, runner: macos-15-intel, arch: x64 }
+          - { label: ubuntu-24-control, runner: ubuntu-24.04, arch: x64 }
+    env:
+      BENCH_LABEL: ${{ matrix.label }}
+      BENCH_SOURCE_REVISION: ${{ github.sha }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: actions/setup-node@v4
+        timeout-minutes: 5
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        timeout-minutes: 5
+        with:
+          python-version: '3.12'
+      - name: Install locked synthetic dependencies
+        timeout-minutes: 5
+        run: npm ci --no-audit --no-fund
+      - name: Runtime and bounded self-checks
+        timeout-minutes: 5
+        run: |
+          node -e "require('node:assert/strict').equal(process.arch,process.env.EXPECTED_ARCH)"
+          rustc --version
+          npm run test:extended
+
+      - name: Software video processing and child termination
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/extended/launch.mjs --suite=video --label=${{ matrix.label }}
+      - name: EXIF alpha composites and PSD read/write
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/extended/launch.mjs --suite=image-chain --label=${{ matrix.label }}
+      - name: Long journal growth replay and deletion
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: node bench/extended/launch.mjs --suite=journal-growth --label=${{ matrix.label }}
+
+      - name: Native IPC and clipboard
+        if: ${{ !cancelled() && runner.os != 'Linux' }}
+        timeout-minutes: 5
+        run: node bench/extended/launch.mjs --suite=ipc --label=${{ matrix.label }}
+      - name: Native IPC and clipboard Linux control
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        timeout-minutes: 5
+        run: xvfb-run --auto-servernum node bench/extended/launch.mjs --suite=ipc --label=${{ matrix.label }}
+      - name: Electron Node proxy and body lifetime
+        if: ${{ !cancelled() && runner.os != 'Linux' }}
+        timeout-minutes: 5
+        run: node bench/extended/launch.mjs --suite=network --label=${{ matrix.label }}
+      - name: Electron Node proxy Linux control
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        timeout-minutes: 5
+        run: xvfb-run --auto-servernum node bench/extended/launch.mjs --suite=network --label=${{ matrix.label }}
+      - name: CLI handshake single instance and restart
+        if: ${{ !cancelled() && runner.os != 'Linux' }}
+        timeout-minutes: 5
+        run: node bench/extended/launch.mjs --suite=lifecycle --label=${{ matrix.label }}
+      - name: CLI handshake single instance Linux control
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        timeout-minutes: 5
+        run: xvfb-run --auto-servernum node bench/extended/launch.mjs --suite=lifecycle --label=${{ matrix.label }}
+
+      - name: Validate all six reports and preserve partial evidence
+        if: ${{ always() }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set +e
+          node bench/extended/summarize.mjs results --label=${{ matrix.label }} --revision=${{ github.sha }}
+          bench_summary_status=$?
+          if [ -f results/extended-summary.md ]; then
+            cat results/extended-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$bench_summary_status"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        timeout-minutes: 5
+        with:
+          name: batch23-evidence-${{ matrix.label }}
+          path: results
+          if-no-files-found: error
+          retention-days: 30
