@@ -54,6 +54,14 @@ label; later sections still run if an unrelated measurement fails. The workflow
 checks `completed: true` and the requested rows before accepting each output. The
 underlying benchmark scripts are unchanged from the first sweep.
 
+Archived measurements are in [evidence/2026-10-13-macos.json](evidence/2026-10-13-macos.json)
+on branch `mac-evidence`. They retain runtime/storage metadata, sample counts, measured
+baseline/implemented/reused-index timings and path-association observations. The archive
+combines completed sections of run `38332093362` with the passing follow-up `38333013967`;
+the initial run itself failed when two aggregate commands reached the time limit. All
+requested sections are complete in the combined archive. Full synthetic paths and the
+hypothetical lighter-validation/schema-index variants remain in the original artifacts.
+
 Path observations compare stored raw paths with paths actually returned by `listTight`,
 then use all three lookup variants and check whether the resulting cards receive
 their record IDs. They cover a configured-root symlink, mixed-case directory spelling,
