@@ -182,7 +182,8 @@ the native FFprobe installer and actual tool versions are recorded. The generic 
 client is compiled by the runner's Rust toolchain before measurement. No product source,
 customer data, secrets or paid API calls enter these public scripts.
 
-Each suite has three full-workload samples and immediate progress checkpoints. Completed
+Repeated timing profiles have three full-workload samples and immediate progress checkpoints.
+The synced-append timing and correctness observations run once. Completed
 profiles, source revision, native platform/architecture, cleanup and report errors are
 validated; absent or invalid reports remain partial evidence. Unsupported clipboard
 facilities and deliberately observed library/process behavior remain explicit observations.
@@ -196,3 +197,32 @@ The app's startup timing covers the small harness only. Hardware video encoding,
 UI/GPU/input latency, sleep/wake, installation/updating, actual NAS and power loss are
 outside this investigation. Linux's special development Sharp version and product
 development/test/package workflows remain unchanged.
+
+The complete five-platform set is archived in
+[evidence/2026-10-13-batches23.json](evidence/2026-10-13-batches23.json) on branch
+`platform-batch23-evidence`, from
+[run 38355617335](https://github.com/98624017/media-library-open-bench-tmp/actions/runs/38355617335)
+at measurement candidate `4148fe3dd639aa7f9bd0127f1c7a57256ce0732d`: 30 full reports,
+920 timing samples and 60 observations. All five jobs and their 43 bounded self-checks passed.
+The archive retains original reports, supervisor receipts, derived summaries and Actions
+job/step metadata. Its branch adds stricter offline validation and seven passing contract
+tests; measurement code and workloads retain the candidate revision above. The archive
+branch does not trigger benchmark runs.
+
+```bash
+node bench/extended/archive.mjs results/batch23-evidence evidence/2026-10-13-batches23.json 4148fe3dd639aa7f9bd0127f1c7a57256ce0732d 38355617335
+```
+
+Archiving also reads the public run metadata through an available `gh` CLI. It requires
+the exact five successful jobs, matching candidate, successful self-check steps, complete
+profiles, the expected suite in each directory, required timing objects, natural zero exits,
+and confirmed cleanup. Failed boolean controls remain failures; platform behavior such as
+a Windows Node leaf exiting with its parent remains an explicitly labeled observation.
+
+Incremental journal offsets remove the old prefix-rescan cost; streaming/yield additionally
+reduces long recovery stalls. Bounded image concurrency helps codec work but can worsen JS
+pixel-loop stalls. A fresh Worker per image trades startup time for responsiveness. Large
+clipboard writes themselves are expensive on both Mac targets; write/read/PNG encode times
+are recorded separately. Video concurrency approximately doubles sampled native RSS and
+has variable speed gains. Controlled proxy/PAC/body-abort and single-instance/restart checks
+passed on all targets. These are synthetic mechanism measurements with the scopes above.

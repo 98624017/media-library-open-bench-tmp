@@ -2,14 +2,33 @@ import assert from 'node:assert/strict'
 
 export const SUITES = ['video', 'image-chain', 'journal-growth', 'ipc', 'network', 'lifecycle']
 
+const OBSERVATION_PROFILES = new Set([
+  ...[
+    'compression-timeout',
+    'parent-kill-counterexample',
+    'download-tree-cancel',
+    'download-tree-timeout'
+  ].map((scenario) => `video/${scenario}/process-observation`),
+  'journal-growth/directory-sync-policy/native-observation',
+  'journal-growth/replay-correctness/checkpoint-old-log-delete',
+  ...['body-stall-deadline', 'mid-body-interruption', 'caller-abort'].flatMap((scenario) =>
+    ['electron-session', 'node-undici'].map((variant) => `network/${scenario}/${variant}`)
+  )
+])
+
 export async function profilesFor(suite) {
   assert(SUITES.includes(suite), 'Unknown suite')
   return (await import(`./${suite}.mjs`)).PROFILES
 }
 
-export function validateReport(report, profiles, { revision, label, requireComplete = true } = {}) {
+export function validateReport(
+  report,
+  profiles,
+  { revision, label, suite, requireComplete = true } = {}
+) {
   assert.equal(report.schemaVersion, 1)
   assert(SUITES.includes(report.suite))
+  if (suite) assert.equal(report.suite, suite, 'Report suite differs from expected directory')
   assert(Number.isInteger(report.sampleCount) && report.sampleCount > 0)
   if (requireComplete) assert.equal(report.completed, true, 'Incomplete report')
   assert(!report.error, 'Report contains a terminal error')
@@ -46,6 +65,9 @@ export function validateReport(report, profiles, { revision, label, requireCompl
         'Unsupported clipboard still cannot hide a failed pixel control'
       )
     } else {
+      if (OBSERVATION_PROFILES.has(`${report.suite}/${row.scenario}/${row.variant}`))
+        assert.equal(row.metrics, null, `Observation must not invent timing: ${key}`)
+      else assert(row.metrics && typeof row.metrics === 'object', `Missing timing metrics: ${key}`)
       for (const [name, passed] of checkEntries)
         assert.equal(passed, true, `Failed control ${name}: ${key}`)
     }
@@ -87,4 +109,15 @@ export function validateReport(report, profiles, { revision, label, requireCompl
     assert.equal(report.summary.runtime.electron, '39.8.3')
   }
   return { profiles: profiles.length, rows: seen.size }
+}
+
+export function validateSupervisor(supervisor, { suite, label, revision }) {
+  assert.equal(supervisor.schemaVersion, 1)
+  assert.equal(supervisor.suite, suite)
+  assert.equal(supervisor.label, label)
+  assert.equal(supervisor.sourceRevision, revision)
+  assert.equal(supervisor.completed, true, 'Supervisor did not confirm success and cleanup')
+  assert.equal(supervisor.reason, 'exit', 'Supervisor did not confirm natural exit')
+  assert.equal(supervisor.exitCode, 0, 'Supervisor reported a failing exit code')
+  assert(!supervisor.error, 'Supervisor reported a terminal error')
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { validateReport } from './validation.mjs'
+import { validateReport, validateSupervisor } from './validation.mjs'
 import { parseDiscovery } from './lifecycle.mjs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -14,7 +14,16 @@ const row = {
   variant: 'control',
   sample: 0,
   workload: { bytes: 20 },
-  metrics: null,
+  metrics: {
+    wallMs: 1,
+    cpuUserMs: 0,
+    cpuSystemMs: 0,
+    maxHeartbeatGapMs: 1,
+    eventLoopDelayMaxMs: 1,
+    rssStartBytes: 1,
+    rssEndBytes: 1,
+    rssObservedPeakBytes: 1
+  },
   checks: { bytesMatch: true }
 }
 const report = () => ({
@@ -60,12 +69,37 @@ test('failed controls are rejected while an explicit unsupported clipboard remai
     ...row,
     scenario: 'clipboard-medium',
     status: 'unsupported',
+    metrics: null,
     checks: { available: false }
   }
   const clipboard = [{ scenario: 'clipboard-medium', variant: 'control' }]
   assert.equal(validateReport(unsupported, clipboard).rows, 1)
   unsupported.rows[0].checks.allPixelsMatch = false
   assert.throws(() => validateReport(unsupported, clipboard), /hide a failed pixel control/)
+})
+test('directory suite cannot be relabelled and timed samples cannot become observations', () => {
+  assert.throws(() => validateReport(report(), profiles, { suite: 'video' }), /suite differs/)
+  const missing = report()
+  missing.rows[0].metrics = null
+  assert.throws(() => validateReport(missing, profiles), /Missing timing metrics/)
+})
+test('a success flag cannot hide a supervisor deadline or nonzero exit', () => {
+  const identity = { suite: 'ipc', label: 'test', revision: 'same' }
+  const receipt = {
+    schemaVersion: 1,
+    suite: 'ipc',
+    label: 'test',
+    sourceRevision: 'same',
+    completed: true,
+    reason: 'exit',
+    exitCode: 0
+  }
+  assert.doesNotThrow(() => validateSupervisor(receipt, identity))
+  assert.throws(
+    () => validateSupervisor({ ...receipt, reason: 'deadline' }, identity),
+    /natural exit/
+  )
+  assert.throws(() => validateSupervisor({ ...receipt, exitCode: 1 }, identity), /failing exit/)
 })
 test('discovery only accepts a valid loopback fixture port and process identity', () => {
   assert.deepEqual(parseDiscovery('{"port":45300,"pid":22}'), { port: 45300, pid: 22 })

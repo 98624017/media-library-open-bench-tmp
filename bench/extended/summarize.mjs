@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { median } from '../platform/metrics.mjs'
-import { SUITES, profilesFor, validateReport } from './validation.mjs'
+import { SUITES, profilesFor, validateReport, validateSupervisor } from './validation.mjs'
 
 export async function summarize(directory, { label, revision }) {
   const reports = []
@@ -11,16 +11,11 @@ export async function summarize(directory, { label, revision }) {
     const path = join(directory, `extended-${label}-${suite}`, 'report.json')
     try {
       const report = JSON.parse(await readFile(path, 'utf8'))
-      validateReport(report, await profilesFor(suite), { label, revision })
+      validateReport(report, await profilesFor(suite), { label, revision, suite })
       const supervisor = JSON.parse(
         await readFile(join(directory, `extended-${label}-${suite}`, 'supervisor.json'), 'utf8')
       )
-      assert.equal(supervisor.schemaVersion, 1)
-      assert.equal(supervisor.suite, suite)
-      assert.equal(supervisor.label, label)
-      assert.equal(supervisor.sourceRevision, revision)
-      assert.equal(supervisor.completed, true, 'Supervisor did not confirm success and cleanup')
-      assert(!supervisor.error, 'Supervisor reported a terminal error')
+      validateSupervisor(supervisor, { suite, label, revision })
       assert.equal(report.quick, false, 'Quick workload is not full runner evidence')
       assert.equal(report.sampleCount, 3, 'Three runner samples are required')
       const expectedPlatform = label.startsWith('windows-')
