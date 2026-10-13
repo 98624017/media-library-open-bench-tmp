@@ -168,6 +168,8 @@ export async function observeProcessTree({ tree, timeout = false }) {
   let leafRegistration = Promise.resolve()
   let leafRegistrationError
   let parentPid
+  let observation
+  let ownedCleanupComplete = false
   try {
     result = await runProcess(process.execPath, [CHILD_PATH, 'parent'], {
       tree,
@@ -180,40 +182,49 @@ export async function observeProcessTree({ tree, timeout = false }) {
       },
       onStdout(chunk) {
         pending += chunk
-        const line = pending.split('\n')[0]
-        if (ready || !pending.includes('\n')) return
-        const message = JSON.parse(line)
-        assert(Number.isInteger(message.descendantPid) && message.descendantPid > 0)
-        descendantPid = message.descendantPid
-        ready = true
-        if (process.platform === 'win32') {
-          leafRegistration = registerOwnedGroup(descendantPid)
-            .then((release) => {
-              unregisterLeaf = release
-              if (!timeout) cancelTimer = setTimeout(() => controller.abort(), 120)
+        const lines = pending.split('\n')
+        pending = lines.pop()
+        for (const line of lines) {
+          if (ready) continue
+          const message = JSON.parse(line)
+          assert(Number.isInteger(message.descendantPid) && message.descendantPid > 0)
+          assert(descendantPid === null || descendantPid === message.descendantPid)
+          if (descendantPid === null && process.platform === 'win32') {
+            leafRegistration = registerOwnedGroup(message.descendantPid)
+              .then((release) => {
+                unregisterLeaf = release
+              })
+              .catch((error) => {
+                leafRegistrationError = error
+                controller.abort(error)
+              })
+          }
+          descendantPid = message.descendantPid
+          if (!message.ready) continue
+          ready = true
+          if (!timeout)
+            leafRegistration.then(() => {
+              if (!leafRegistrationError) cancelTimer = setTimeout(() => controller.abort(), 120)
             })
-            .catch((error) => {
-              leafRegistrationError = error
-              controller.abort(error)
-            })
-        } else if (!timeout) cancelTimer = setTimeout(() => controller.abort(), 120)
+        }
       }
     })
     await leafRegistration
     if (leafRegistrationError) throw leafRegistrationError
-    assert(ready, 'tree fixture must start its descendant before termination')
+    assert(ready, `tree fixture leaf was not ready (exit=${result.code}, reason=${result.reason})`)
     const parentStopped = await waitForExit(result.pid)
     const descendantSurvived = await isProcessAlive(descendantPid)
     const descendantStopped = tree ? await waitForExit(descendantPid) : !descendantSurvived
-    return {
+    observation = {
       reason: result.reason,
       terminationMs: result.wallMs,
       killResult: result.killResult,
       descendantSurvived,
+      counterexampleObserved: !tree && descendantSurvived,
       checks: {
         fixtureReady: ready,
         parentStopped,
-        ...(tree ? { descendantStopped } : { counterexampleObserved: descendantSurvived })
+        ...(tree ? { descendantStopped } : {})
       }
     }
   } finally {
@@ -231,11 +242,14 @@ export async function observeProcessTree({ tree, timeout = false }) {
     if (parentPid) assert(await waitForExit(parentPid), 'owned parent did not exit during cleanup')
     await unregisterLeaf()
     await unregister()
+    ownedCleanupComplete = true
   }
+  return { ...observation, checks: { ...observation.checks, ownedCleanupComplete } }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === CHILD_PATH) {
   assert(['parent', 'leaf'].includes(process.argv[2]))
+  let keepAlive
   if (process.argv[2] === 'parent') {
     // The child must prove registry ownership itself before spawning a long-lived leaf.
     // Its caller retains the record until both PIDs have been reclaimed.
@@ -243,15 +257,27 @@ if (process.argv[1] && resolve(process.argv[1]) === CHILD_PATH) {
     const leaf = spawn(process.execPath, [CHILD_PATH, 'leaf'], {
       shell: false,
       windowsHide: true,
-      stdio: 'ignore'
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc']
     })
     leaf.once('error', (error) => {
       console.error(error.message)
       process.exitCode = 1
     })
+    let leafReady = false
     leaf.once('spawn', () =>
-      process.stdout.write(JSON.stringify({ descendantPid: leaf.pid }) + '\n')
+      process.stdout.write(JSON.stringify({ descendantPid: leaf.pid, ready: false }) + '\n')
     )
+    leaf.once('message', (message) => {
+      assert(message?.type === 'leaf-ready' && message.pid === leaf.pid)
+      leafReady = true
+      process.stdout.write(JSON.stringify({ descendantPid: leaf.pid, ready: true }) + '\n')
+    })
+    leaf.once('exit', () => {
+      if (leafReady) return
+      clearInterval(keepAlive)
+      process.exitCode = 1
+    })
   } else if (process.platform === 'win32') await registerOwnedGroup(process.pid)
-  setInterval(() => {}, 1000)
+  keepAlive = setInterval(() => {}, 1000)
+  if (process.argv[2] === 'leaf') process.send?.({ type: 'leaf-ready', pid: process.pid })
 }

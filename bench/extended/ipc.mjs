@@ -72,7 +72,10 @@ async function decodeInRenderer({ variant, repeats, points }) {
       if (ownedUrl) URL.revokeObjectURL(ownedUrl)
     }
   }
-  return { results, processMemoryScope: 'Renderer timings, without precise renderer memory peaks' }
+  return {
+    results,
+    processMemoryScope: 'Renderer timings, without precise renderer memory peaks'
+  }
 }
 
 export async function runBench({ base, quick, sampleCount, emit, electron }) {
@@ -112,7 +115,9 @@ export async function runBench({ base, quick, sampleCount, emit, electron }) {
       const width = quick ? (size === 'medium' ? 128 : 512) : size === 'medium' ? 1024 : 2048
       const height = width
       const source = fixture(width, height)
-      const png = await sharp(source.raw, { raw: { width, height, channels: 3 } })
+      const png = await sharp(source.raw, {
+        raw: { width, height, channels: 3 }
+      })
         .png()
         .toBuffer()
       const path = join(base, `生成 图片 ${size}.png`)
@@ -164,10 +169,22 @@ export async function runBench({ base, quick, sampleCount, emit, electron }) {
         let measured
         try {
           measured = await measure(() => {
+            const started = performance.now()
             clipboard.writeImage(image)
+            const written = performance.now()
             const read = clipboard.readImage()
+            const readAt = performance.now()
             if (read.isEmpty()) return null
-            return read.toPNG()
+            const encodeStarted = performance.now()
+            const png = read.toPNG()
+            return {
+              png,
+              apiTimingsMs: {
+                writeImage: written - started,
+                readImage: readAt - written,
+                toPNG: performance.now() - encodeStarted
+              }
+            }
           })
         } catch (error) {
           await emit({
@@ -197,7 +214,7 @@ export async function runBench({ base, quick, sampleCount, emit, electron }) {
           })
           continue
         }
-        const decoded = await sharp(measured.value)
+        const decoded = await sharp(measured.value.png)
           .removeAlpha()
           .raw()
           .toBuffer({ resolveWithObject: true })
@@ -212,7 +229,8 @@ export async function runBench({ base, quick, sampleCount, emit, electron }) {
           workload: { width, height, pngBytes: png.length },
           metrics: measured.metrics,
           checks: { available: true, allPixelsMatch: true },
-          outputPngBytes: measured.value.length
+          outputPngBytes: measured.value.png.length,
+          clipboardApiTimingsMs: measured.value.apiTimingsMs
         })
       }
     }

@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { PROFILES, compressionArgs, geometry, parseProbe } from './video.mjs'
-import { runProcess, waitForExit } from './video-child.mjs'
+import {
+  PROFILES,
+  compressionArgs,
+  geometry,
+  parseProbe,
+  validateProcessObservation
+} from './video.mjs'
+import { observeProcessTree, runProcess, waitForExit } from './video-child.mjs'
 import { createMemorySampler } from './video-memory.mjs'
 
 const SOURCE = { duration: 3, width: 1280, height: 720, sar: 1, rotation: 0, hasAudio: true }
@@ -79,6 +85,63 @@ test('profiles cover ten timed operations per sample and four one-time observati
     14
   )
 })
+
+test('parent-only observation accepts the captured Windows no-survivor result after verified cleanup', () => {
+  const observed = {
+    reason: 'cancelled',
+    descendantSurvived: false,
+    counterexampleObserved: false,
+    checks: { fixtureReady: true, parentStopped: true, ownedCleanupComplete: true }
+  }
+  assert.doesNotThrow(() => validateProcessObservation(observed, { tree: false }))
+})
+
+test('surviving descendant is a fact; parent, fixture and harness cleanup remain mandatory', () => {
+  const observed = {
+    reason: 'cancelled',
+    descendantSurvived: true,
+    counterexampleObserved: true,
+    checks: { fixtureReady: true, parentStopped: true, ownedCleanupComplete: true }
+  }
+  assert.doesNotThrow(() => validateProcessObservation(observed, { tree: false }))
+  for (const key of ['fixtureReady', 'parentStopped', 'ownedCleanupComplete']) {
+    assert.throws(() =>
+      validateProcessObservation(
+        { ...observed, checks: { ...observed.checks, [key]: false } },
+        { tree: false }
+      )
+    )
+  }
+})
+
+test('tree cancellation cannot pass just because harness cleanup eventually stopped the leaf', () => {
+  const observed = {
+    reason: 'cancelled',
+    descendantSurvived: true,
+    checks: {
+      fixtureReady: true,
+      parentStopped: true,
+      ownedCleanupComplete: true,
+      descendantStopped: false
+    }
+  }
+  assert.throws(() => validateProcessObservation(observed, { tree: true }))
+  assert.throws(() =>
+    validateProcessObservation({ ...observed, reason: 'timeout' }, { tree: false })
+  )
+})
+
+test(
+  'real parent-only fixture waits for leaf readiness and reports verified cleanup',
+  { timeout: 7000 },
+  async () => {
+    const observation = await observeProcessTree({ tree: false })
+    validateProcessObservation(observation, { tree: false })
+    assert.equal(typeof observation.counterexampleObserved, 'boolean')
+    assert(!('counterexampleObserved' in observation.checks))
+    assert(Object.values(observation.checks).every((value) => value === true))
+  }
+)
 
 test('bounded direct timeout waits for actual child exit', { timeout: 7000 }, async () => {
   const result = await runProcess(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {

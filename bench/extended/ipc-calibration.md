@@ -17,6 +17,9 @@ Repeated file URLs may use Chromium's decoded-image/file caches. These are mecha
 not interchangeable authorization contracts; no product local-file access boundary changes.
 
 The clipboard profile uses actual nativeImage/clipboard.writeImage/readImage/toPNG.
+NativeImage creation is outside timing. The measured synchronous roundtrip records
+writeImage, readImage and toPNG durations separately, so readback/encoding cost cannot
+be mistaken for the cost of a product copy action that only writes the clipboard.
 Every decoded RGB pixel must equal the source. An unavailable/empty native clipboard is
 recorded explicitly as unsupported, not claimed as a passing clipboard certificate.
 Common metrics observe Main responsiveness/CPU/RSS; they exclude renderer/native helper

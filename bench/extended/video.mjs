@@ -413,6 +413,15 @@ async function encodeRow({
   await rm(target)
 }
 
+export function validateProcessObservation(observation, { tree, timeout = false }) {
+  assert(observation.checks.fixtureReady)
+  assert(observation.checks.parentStopped)
+  assert(observation.checks.ownedCleanupComplete)
+  assert.equal(typeof observation.descendantSurvived, 'boolean')
+  assert.equal(observation.reason, timeout ? 'timeout' : 'cancelled')
+  if (tree) assert(observation.checks.descendantStopped)
+}
+
 async function processObservations(ffmpeg, emit) {
   const timedOut = await runProcess(
     ffmpeg,
@@ -463,10 +472,7 @@ async function processObservations(ffmpeg, emit) {
       checks: observation.checks,
       observation: { ...observation, checks: undefined }
     })
-    assert(observation.checks.parentStopped)
-    assert.equal(observation.reason, timeout ? 'timeout' : 'cancelled')
-    if (tree) assert(observation.checks.descendantStopped)
-    else assert(observation.checks.counterexampleObserved)
+    validateProcessObservation(observation, { tree, timeout })
   }
 }
 

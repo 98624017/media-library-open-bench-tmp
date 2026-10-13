@@ -146,19 +146,81 @@ test('natural exit with a registered leftover fails after reclaiming that group'
   await assertStopped(Number(failure.stdout))
 })
 
-test('registered ownership survives group leader exit until its leaf is stopped', async () => {
+function orphanFixture({ detachedLeaf }) {
   const module = pathToFileURL(fileURLToPath(new URL('./termination.mjs', import.meta.url))).href
-  const leaf = `import {registerOwnedGroup} from ${JSON.stringify(module)};if(process.platform==='win32')await registerOwnedGroup(process.pid);setInterval(()=>{},1000)`
-  const leader = `const{spawn}=require('node:child_process');const leaf=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(leaf)}],{stdio:'ignore'});process.stdout.write(String(leaf.pid));leaf.unref()`
-  const code = `import {spawn} from 'node:child_process';import {registerOwnedGroup} from ${JSON.stringify(module)};const leader=spawn(process.execPath,['-e',${JSON.stringify(leader)}],{detached:process.platform!=='win32',stdio:['ignore','pipe','ignore']});await registerOwnedGroup(leader.pid);leader.stdout.on('data',chunk=>process.stdout.write(chunk));setInterval(()=>{},1000)`
+  const leaf = `
+    import {registerOwnedGroup} from ${JSON.stringify(module)};
+    if (${detachedLeaf}) await registerOwnedGroup(process.pid);
+    process.send({pid:process.pid,registered:${detachedLeaf}});
+    process.disconnect();
+    setInterval(()=>{},1000);
+  `
+  const leader = `
+    const assert=require('node:assert/strict');
+    const {spawn}=require('node:child_process');
+    const leaf=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(leaf)}],{
+      detached:${detachedLeaf},windowsHide:true,stdio:['ignore','ignore','ignore','ipc']
+    });
+    leaf.once('error',error=>{throw error});
+    leaf.once('message',message=>{
+      assert.equal(message.pid,leaf.pid);
+      assert.equal(message.registered,${detachedLeaf});
+      leaf.unref();
+      process.stdout.write(JSON.stringify(message),()=>process.exit(0));
+    });
+  `
+  return `
+    import assert from 'node:assert/strict';
+    import {spawn} from 'node:child_process';
+    import {registerOwnedGroup} from ${JSON.stringify(module)};
+    const leader=spawn(process.execPath,['-e',${JSON.stringify(leader)}],{
+      detached:process.platform!=='win32',windowsHide:true,stdio:['ignore','pipe','pipe']
+    });
+    let body='';
+    leader.stdout.on('data',chunk=>{body+=chunk});
+    leader.stderr.on('data',chunk=>process.stderr.write(chunk));
+    const closed=new Promise((resolve,reject)=>{
+      leader.once('error',reject);
+      leader.once('close',(code,signal)=>resolve({code,signal}));
+    });
+    await registerOwnedGroup(leader.pid);
+    const exit=await closed;
+    assert.equal(exit.code,0);
+    const ready=JSON.parse(body);
+    process.kill(ready.pid,0);
+    process.stdout.write(JSON.stringify({leaderPid:leader.pid,leafPid:ready.pid,
+      leafRegistered:ready.registered,leaderExited:true,leafAliveAfterLeaderExit:true}));
+    setInterval(()=>{},1000);
+  `
+}
+
+async function checkOrphanCleanup(detachedLeaf) {
+  const code = orphanFixture({ detachedLeaf })
   const result = await runWithDeadline(process.execPath, ['--input-type=module', '-e', code], {
     stdio,
-    deadlineMs: 1200,
+    deadlineMs: 3000,
     cleanupMs: 5000
   })
   assert.equal(result.reason, 'deadline')
-  assert.equal(result.registered.length, process.platform === 'win32' ? 2 : 1)
-  await assertStopped(Number(result.stdout))
+  const readiness = JSON.parse(result.stdout)
+  assert.equal(readiness.leaderExited, true)
+  assert.equal(readiness.leafAliveAfterLeaderExit, true)
+  assert.equal(readiness.leafRegistered, detachedLeaf)
+  assert.equal(result.registered.length, detachedLeaf ? 2 : 1)
+  const cleanedPids = result.registered.map((group) => group.pid)
+  assert(cleanedPids.includes(readiness.leaderPid))
+  if (detachedLeaf) assert(cleanedPids.includes(readiness.leafPid))
+  await assertStopped(readiness.leaderPid)
+  await assertStopped(readiness.leafPid)
+}
+
+test('registered ownership survives group leader exit until its leaf is stopped', async () => {
+  // libuv's Windows job kills non-detached children when their parent exits.
+  await checkOrphanCleanup(process.platform === 'win32')
+})
+
+test('independently registered detached leaf survives leader exit and is reclaimed', async () => {
+  await checkOrphanCleanup(true)
 })
 
 test('wrong-nonce registration is rejected without preventing owned main-group cleanup', async () => {

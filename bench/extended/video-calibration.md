@@ -70,10 +70,24 @@ The compression-timeout observation runs actual standalone FFmpeg, forces a boun
 timeout, waits for `close`, and confirms its PID no longer runs. The product's compression
 helper uses direct `SIGKILL`; the suite does not add cancellation to that product helper.
 
-A synthetic Node parent creates an independent descendant. Directly killing only the
-parent deliberately demonstrates a surviving descendant. This is a genuine counterexample
-to parent-only termination for process trees, not evidence that ordinary standalone FFmpeg
-leaks a descendant. The descendant is then explicitly stopped.
+A synthetic Node parent creates a non-detached Node leaf. The parent exposes its PID for
+ownership before acknowledging leaf readiness over IPC. The leaf must finish startup and
+registration and enter its idle loop before the parent-only termination observation begins.
+Whether the leaf survives is a platform fact in `observation.descendantSurvived` and
+`observation.counterexampleObserved`, not a universally required successful counterexample.
+The retained profile name does not imply the counterexample occurred on every platform.
+
+The first Windows Server 2022/2025 run observed the parent and leaf both exited after
+parent-only kill. This matches [libuv 1.51.0's Windows job ownership](https://github.com/libuv/libuv/blob/v1.51.0/src/win/process.c):
+non-detached `uv_spawn` children are assigned to the Node parent's non-inheritable Job
+Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The Node parent exiting may therefore
+kill that direct leaf as well. This says nothing universal about grandchildren created
+by Python or other external tools, detached children, or standalone FFmpeg.
+
+Controls require real leaf readiness, the expected cancellation/timeout reason, parent
+exit and verified harness cleanup. A surviving leaf is explicitly stopped before declaring
+`ownedCleanupComplete`; an already-exited leaf is verified absent. Positive tree controls
+still require the requested tree kill itself to stop the leaf, before fallback cleanup.
 
 The tree cancellation and timeout controls use the downloader's native primitives:
 detached process groups and negative-PID `SIGKILL` on Unix; `taskkill /T /F` on Windows.
