@@ -132,6 +132,21 @@ Wall time, process CPU, event-loop stalls and sampled RSS are recorded. The hear
 checks that an immediate synchronous stall is visible; it does not include arbitrary
 idle time. Sampled RSS can miss brief peaks; process lifetime high-water is cumulative.
 All files, databases and crash targets are generated under owned temporary roots.
+
+The complete one-shot measurements are archived in
+[evidence/2026-10-13-platform.json](evidence/2026-10-13-platform.json) on branch
+`platform-deep-evidence`, from [run 38340081834](https://github.com/98624017/media-library-open-bench-tmp/actions/runs/38340081834)
+at benchmark candidate `8aa54bff521a9cd6764e3ea8ba2909dadcd20dde`. All five jobs
+passed evidence validation: 43 reports, 1,146 timing samples and 51 additional
+correctness observations. The archive branch does not trigger this workflow.
+
+Default and fileless caching failed native trash and in-place overwrite on both
+Windows runners, with little timing benefit; disabled controls passed. All native
+cache actions passed on both Mac targets. Asynchronous file I/O substantially
+reduced long event-loop gaps, without consistently reducing total time. Native
+directory sync was unsupported on Windows, so the mirrored safety policy retained
+the journal. Windows real-time antivirus protection was disabled in the runner's
+observed default state; the investigation did not modify it.
 Workflow summaries require all 5 Linux, 9 Windows or 10 Mac reports, including the
 extra-volume probes. Missing reports and failed disabled-cache controls remain partial;
 observed failures of candidate cache policies do not invalidate the control measurements.
