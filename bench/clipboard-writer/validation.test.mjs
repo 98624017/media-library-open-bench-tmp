@@ -32,6 +32,45 @@ function report(name = 'transparent') {
     size: { width: layout.width, height: layout.height },
     scales: [...nativeScales]
   })
+  const colorMetadata = (format = 'png') => ({
+    format,
+    width: layout.width,
+    height: layout.height,
+    space: 'srgb',
+    channels: 4,
+    depth: 'uchar',
+    density: null,
+    bitsPerSample: 8,
+    hasAlpha: true,
+    hasProfile: false,
+    orientation: null,
+    icc: null,
+    pngColorChunks: []
+  })
+  const bitmapMetadata = () => ({
+    width: layout.width,
+    height: layout.height,
+    bitsPerSample: 8,
+    bitsPerPixel: 32,
+    samplesPerPixel: 4,
+    hasAlpha: true,
+    isPlanar: false,
+    bitmapFormat: 2,
+    colorSpaceName: 'NSCalibratedRGBColorSpace'
+  })
+  const sourceDelta = () => ({
+    dimensionsMatch: true,
+    comparedPixels: layout.width * layout.height,
+    differingPixels: 0,
+    channels: ['red', 'green', 'blue', 'alpha'].map((name) => ({
+      name,
+      changed: 0,
+      absoluteDeltaSum: 0,
+      signedDeltaSum: 0,
+      maxAbsoluteDelta: 0
+    })),
+    examples: []
+  })
   return {
     schemaVersion: 1,
     completed: true,
@@ -99,15 +138,107 @@ function report(name = 'transparent') {
               format: 'public.png',
               declared: true,
               bytes: 10,
-              pixels: pixels()
+              pixels: pixels(),
+              colorMetadata: colorMetadata(),
+              bitmapMetadata: bitmapMetadata(),
+              sourceDelta: sourceDelta()
             },
-            { format: 'public.tiff', declared: false, bytes: 0, pixels: null }
+            {
+              format: 'public.tiff',
+              declared: false,
+              bytes: 0,
+              pixels: null,
+              colorMetadata: null,
+              bitmapMetadata: null,
+              sourceDelta: null
+            }
           ]
         }
       }))
     ).flat()
   }
 }
+
+function reportWithNativeTiffSourceDelta() {
+  const data = report()
+  for (const row of data.rows) {
+    const png = row.native.images[0]
+    const tiff = structuredClone(png)
+    tiff.format = 'public.tiff'
+    tiff.colorMetadata.format = 'tiff'
+    tiff.colorMetadata.hasProfile = true
+    tiff.colorMetadata.icc = {
+      bytes: 3144,
+      sha256,
+      profileClass: 'mntr',
+      colorSpace: 'RGB ',
+      pcs: 'XYZ ',
+      signature: 'acsp'
+    }
+    tiff.pixels.rgbaSha256 = 'c'.repeat(64)
+    tiff.sourceDelta.differingPixels = 1
+    tiff.sourceDelta.channels[0] = {
+      name: 'red',
+      changed: 1,
+      absoluteDeltaSum: 1,
+      signedDeltaSum: 1,
+      maxAbsoluteDelta: 1
+    }
+    row.native.images[1] = tiff
+    row.native.formats.push('public.tiff')
+  }
+  return data
+}
+
+test('ordinary TIFF source delta passes only with exact same-flavor pixels and native color/alpha metadata', () => {
+  const data = reportWithNativeTiffSourceDelta()
+  validateReport(data)
+  assert.notEqual(
+    data.rows[0].native.images[1].pixels.rgbaSha256,
+    data.rows[0].preparedPixels.rgbaSha256
+  )
+  for (const mutate of [
+    (entry) => {
+      entry.pixels.rgbaSha256 = 'd'.repeat(64)
+    },
+    (entry) => {
+      entry.pixels.semiTransparentPixels++
+    },
+    (entry) => {
+      entry.colorMetadata.icc.sha256 = 'd'.repeat(64)
+    },
+    (entry) => {
+      entry.bitmapMetadata.bitmapFormat = 0
+    },
+    (entry) => {
+      entry.bitmapMetadata.colorSpaceName = 'NSDeviceRGBColorSpace'
+    },
+    (entry) => {
+      entry.colorMetadata.orientation = 1
+    },
+    (entry) => {
+      entry.colorMetadata.pngColorChunks.push({ type: 'sRGB', bytes: 1, sha256 })
+    },
+    (entry) => {
+      entry.bytes = 0
+    },
+    (entry) => {
+      entry.colorMetadata = undefined
+    },
+    (entry) => {
+      entry.bitmapMetadata = undefined
+    },
+    (entry) => {
+      entry.sourceDelta.channels[3].changed = 1
+    }
+  ]) {
+    const changed = reportWithNativeTiffSourceDelta()
+    mutate(changed.rows[1].native.images[1])
+    assert.throws(() => validateReport(changed))
+  }
+  for (const row of data.rows) row.native.images[0].pixels.rgbaSha256 = 'c'.repeat(64)
+  assert.throws(() => validateReport(data), 'Native PNG must still reproduce source RGBA exactly')
+})
 
 test('complete rotated native samples retain distributions; missing rows/observer/cleanup fail', () => {
   assert.equal(validateReport(report())['write-image'].writeMs.median, 13)

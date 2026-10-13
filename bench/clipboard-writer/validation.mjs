@@ -29,6 +29,101 @@ const distribution = (values) => {
   return { min: sorted[0], median: median(sorted), max: sorted.at(-1), values: sorted }
 }
 
+function validateNativeImage(entry, preparedPixels) {
+  assert(Number.isSafeInteger(entry.bytes) && entry.bytes >= 0)
+  if (!entry.bytes) {
+    assert.equal(entry.pixels, null)
+    assert.equal(entry.colorMetadata, null)
+    assert.equal(entry.bitmapMetadata, null)
+    assert.equal(entry.sourceDelta, null)
+    return
+  }
+  assert(validPixels(entry.pixels))
+  assert.equal(entry.pixels.width, preparedPixels.width)
+  assert.equal(entry.pixels.height, preparedPixels.height)
+  const metadata = entry.colorMetadata
+  assert.equal(metadata.format, entry.format === 'public.png' ? 'png' : 'tiff')
+  assert.equal(metadata.width, entry.pixels.width)
+  assert.equal(metadata.height, entry.pixels.height)
+  assert.equal(metadata.space, 'srgb')
+  assert.equal(metadata.channels, 4)
+  assert.equal(metadata.depth, 'uchar')
+  assert.equal(metadata.bitsPerSample, 8)
+  assert.equal(metadata.hasAlpha, true)
+  assert.equal(typeof metadata.hasProfile, 'boolean')
+  assert(metadata.density === null || (Number.isFinite(metadata.density) && metadata.density > 0))
+  assert(
+    metadata.orientation === null ||
+      (Number.isInteger(metadata.orientation) &&
+        metadata.orientation >= 1 &&
+        metadata.orientation <= 8)
+  )
+  if (metadata.hasProfile) {
+    assert(Number.isInteger(metadata.icc.bytes) && metadata.icc.bytes >= 128)
+    assert(isDigest(metadata.icc.sha256))
+    assert.equal(metadata.icc.signature, 'acsp')
+    assert.equal(metadata.icc.colorSpace, 'RGB ')
+    assert.equal(metadata.icc.pcs, 'XYZ ')
+    assert(typeof metadata.icc.profileClass === 'string' && metadata.icc.profileClass.length === 4)
+  } else assert.equal(metadata.icc, null)
+  assert(Array.isArray(metadata.pngColorChunks))
+  if (entry.format === 'public.tiff') assert.equal(metadata.pngColorChunks.length, 0)
+  for (const chunk of metadata.pngColorChunks) {
+    assert(['iCCP', 'sRGB', 'gAMA', 'cHRM', 'cICP'].includes(chunk.type))
+    assert(Number.isInteger(chunk.bytes) && chunk.bytes > 0 && isDigest(chunk.sha256))
+  }
+  const bitmap = entry.bitmapMetadata
+  assert.equal(bitmap.width, entry.pixels.width)
+  assert.equal(bitmap.height, entry.pixels.height)
+  assert.equal(bitmap.bitsPerSample, 8)
+  assert.equal(bitmap.bitsPerPixel, 32)
+  assert.equal(bitmap.samplesPerPixel, 4)
+  assert.equal(bitmap.hasAlpha, true)
+  assert.equal(bitmap.isPlanar, false)
+  assert(Number.isSafeInteger(bitmap.bitmapFormat) && bitmap.bitmapFormat >= 0)
+  assert(typeof bitmap.colorSpaceName === 'string' && bitmap.colorSpaceName.length > 0)
+  const delta = entry.sourceDelta
+  assert.equal(delta.dimensionsMatch, true)
+  assert.equal(delta.comparedPixels, preparedPixels.width * preparedPixels.height)
+  assert(
+    Number.isInteger(delta.differingPixels) &&
+      delta.differingPixels >= 0 &&
+      delta.differingPixels <= delta.comparedPixels
+  )
+  assert.deepEqual(
+    delta.channels.map((channel) => channel.name),
+    ['red', 'green', 'blue', 'alpha']
+  )
+  for (const channel of delta.channels) {
+    assert(
+      Number.isInteger(channel.changed) &&
+        channel.changed >= 0 &&
+        channel.changed <= delta.comparedPixels
+    )
+    assert(
+      Number.isInteger(channel.absoluteDeltaSum) &&
+        channel.absoluteDeltaSum >= 0 &&
+        channel.absoluteDeltaSum <= channel.changed * 255
+    )
+    assert(
+      Number.isInteger(channel.signedDeltaSum) &&
+        Math.abs(channel.signedDeltaSum) <= channel.absoluteDeltaSum
+    )
+    assert(
+      Number.isInteger(channel.maxAbsoluteDelta) &&
+        channel.maxAbsoluteDelta >= 0 &&
+        channel.maxAbsoluteDelta <= 255
+    )
+  }
+  assert.equal(delta.differingPixels === 0, entry.pixels.rgbaSha256 === preparedPixels.rgbaSha256)
+  assert.equal(delta.channels[3].changed, 0, 'Native flavor changed source alpha bytes')
+  if (entry.format === 'public.png') {
+    assert.deepEqual(entry.pixels, preparedPixels)
+    assert.equal(delta.differingPixels, 0)
+  }
+  // TIFF's ordinary ICC-managed pixels are compared to the same-flavor current writer below.
+}
+
 export function validateReport(report) {
   assert.equal(report.completed, true, 'Incomplete fixture report')
   assert.equal(report.cleanedOwnedDirectory, true, 'Fixture cleanup was not confirmed')
@@ -137,8 +232,7 @@ export function validateReport(report) {
       for (const entry of row.native.images) {
         assert.equal(entry.declared, row.native.formats.includes(entry.format))
         assert(!entry.declared || entry.bytes > 0, 'Declared native image format was not readable')
-        if (entry.bytes > 0) assert.deepEqual(entry.pixels, row.preparedPixels)
-        else assert.equal(entry.pixels, null)
+        validateNativeImage(entry, row.preparedPixels)
       }
     }
   }

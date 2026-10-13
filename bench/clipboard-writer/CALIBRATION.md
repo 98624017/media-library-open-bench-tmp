@@ -29,7 +29,9 @@ pixels and dimensions are checked after writing; inferred 1x uses the native bit
 
 On Mac, NSPasteboard reports actual native types and attempts PNG and TIFF raw readback,
 including types not enumerated by Electron's normalized `availableFormats` API. Every
-declared image format must be readable and match the prepared RGBA pixels. A native
+declared image format must be readable. Prepared NativeImage output, API readback and
+native PNG must reproduce source RGBA exactly. Ordinary native TIFF RGBA and its color/alpha
+metadata must exactly match the current writer's TIFF for the same sample. A native
 flavor absent from the baseline is recorded as absent rather than invented or replaced.
 Both writers must expose equivalent types and decoded data. These controls do not certify
 every application's paste implementation or ICC-profile input; there is no PNG-only writer.
@@ -90,6 +92,16 @@ TIFF, prepared PNG and API-readback PNG under `diagnostics/native-formats/`, wit
 lengths and SHA256 values in the checkpoint. Retention requires quick inputs at most 256px
 per edge and bounds each encoded file to one MiB; full original-size fixtures are not
 retained. A failing baseline stays partial and cannot establish candidate adoption.
+
+The ARM/Intel raw diagnostic at revision `2c2e276d5105ee57f1c492ff3d7f665e029b75d4`
+attributed the old baseline failure to TIFF's embedded 3144-byte `sRGB IEC61966-2.1` ICC
+profile. Ordinary Sharp decoding added one red code value in 152 opaque or 75 RGBA pixels
+of the small fixtures; all alpha bytes were unchanged. The same TIFF decoded with only
+`ignoreIcc: true` matched the prepared RGBA. Native PNG and API readback already matched.
+This test now compares ordinary TIFF pixels and ICC/native bitmap metadata to the same
+format from the current writer, and records TIFF/source differences honestly. It retains
+strict source/API/PNG/scale and alpha controls, without tolerances, normalization or profile
+removal. Full RGBA digest and metadata equality reject candidate TIFF pixel/color/alpha drift.
 
 The workflow is dispatched explicitly. `diagnostic=true` runs only quick RGB/alpha stages
 with one sample and preserves bounded raw evidence; it skips the full-adoption summary.

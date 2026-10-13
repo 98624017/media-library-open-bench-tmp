@@ -234,6 +234,21 @@ async function runOne({
             ...(await inspectNativeFormat(nativeBytes.get(entry.format), preparedBytes))
           }))
       )
+      native = {
+        ...native,
+        images: native.images.map((entry) => {
+          const observed = nativeFormats.find((item) => item.format === entry.format)
+          const reader = row.diagnostics.nativeReader.images.find(
+            (item) => item.format === entry.format
+          )
+          return {
+            ...entry,
+            colorMetadata: observed?.metadata ?? null,
+            bitmapMetadata: entry.bytes ? reader.bitmapMetadata : null,
+            sourceDelta: observed?.differenceFromPrepared ?? null
+          }
+        })
+      }
       row = {
         ...row,
         diagnostics: { ...row.diagnostics, files: [...diagnosticFiles], nativeFormats }
@@ -279,13 +294,23 @@ async function runOne({
         'Writer changed a generated source representation'
       )
     }
-    for (const entry of native?.images ?? [])
-      if (entry.pixels)
+    for (const entry of native?.images ?? []) {
+      if (entry.format === 'public.png' && entry.pixels)
         assert.deepEqual(
           entry.pixels,
           preparedPixels,
           `Native ${entry.format} pixels differ from the prepared bitmap`
         )
+      if (entry.pixels) {
+        assert.equal(entry.pixels.width, preparedPixels.width)
+        assert.equal(entry.pixels.height, preparedPixels.height)
+        assert.equal(
+          entry.sourceDelta.channels[3].changed,
+          0,
+          'Native flavor changed source alpha bytes'
+        )
+      }
+    }
     for (const scale of ready.prepared.scales)
       assert(
         read.preparedAfter.scales.includes(scale),
