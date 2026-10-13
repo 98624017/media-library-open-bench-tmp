@@ -70,7 +70,7 @@ jobs:
           printf '%s\n' "BENCH_MOUNT_DIR=$bench_mount_dir" >> "$GITHUB_ENV"
           mkdir "$bench_mount_dir/local" "$bench_mount_dir/apfs-sensitive" "$bench_mount_dir/hfs"
           sw_vers > results/sw_vers.txt
-          hdiutil create -size 3g -type SPARSE -fs APFSX -volname BenchApfsSensitive "$bench_mount_dir/apfs-sensitive.sparseimage"
+          hdiutil create -size 3g -type SPARSE -fs APFS -fsargs '-e' -volname BenchApfsSensitive "$bench_mount_dir/apfs-sensitive.sparseimage"
           hdiutil attach -nobrowse -noautoopen -mountpoint "$bench_mount_dir/apfs-sensitive" -plist "$bench_mount_dir/apfs-sensitive.sparseimage" > results/apfs-sensitive-attach.plist
           hdiutil create -size 3g -type SPARSE -fs HFS+ -volname BenchHfs "$bench_mount_dir/hfs.sparseimage"
           hdiutil attach -nobrowse -noautoopen -mountpoint "$bench_mount_dir/hfs" -plist "$bench_mount_dir/hfs.sparseimage" > results/hfs-attach.plist
@@ -79,6 +79,14 @@ jobs:
           diskutil info -plist "$bench_local_device" > results/local-disk.plist
           diskutil info -plist "$bench_mount_dir/apfs-sensitive" > results/apfs-sensitive-disk.plist
           diskutil info -plist "$bench_mount_dir/hfs" > results/hfs-disk.plist
+          python3 - <<'PY'
+          import pathlib, plistlib
+          apfs = plistlib.loads(pathlib.Path('results/apfs-sensitive-disk.plist').read_bytes())
+          hfs = plistlib.loads(pathlib.Path('results/hfs-disk.plist').read_bytes())
+          assert apfs.get('FilesystemType') == 'apfs', apfs
+          assert 'case-sensitive' in apfs.get('FileSystemPersonality', '').lower(), apfs
+          assert hfs.get('FilesystemType') == 'hfs', hfs
+          PY
           df -h "$bench_mount_dir/local" "$bench_mount_dir/apfs-sensitive" "$bench_mount_dir/hfs" > results/disk-space.txt
           printf '%s\n' "BENCH_ROOTS=local=$bench_mount_dir/local;apfs-sensitive=$bench_mount_dir/apfs-sensitive;hfs=$bench_mount_dir/hfs" >> "$GITHUB_ENV"
 
