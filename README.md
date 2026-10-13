@@ -110,6 +110,11 @@ open-file replacement and deterministic process-kill checkpoints. Grouped journa
 writes already exist in the application; the synthetic comparison measures batching
 cost, not a missing feature. Killing a process does not certify sudden power loss.
 
+Save fixtures use distinct requested basenames with seeded pre-existing collisions.
+Overlapping same-basename requests are not modeled. The experimental parallel saver
+uses existence checks followed by ordinary writes; adopting it for overlapping name
+claims requires exclusive creation or serialized name reservation.
+
 Images use Sharp 0.34.5 in fresh Node processes, generated JPEG/PNG/WebP/AVIF/TIFF files,
 the 120-pixel asset thumbnail and 400-pixel preview policies, and concurrency two.
 These are RGB fixtures; this sweep does not certify EXIF rotation, transparency or
