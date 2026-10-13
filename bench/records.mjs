@@ -64,13 +64,16 @@ export function openRecords(file, { fold }) {
     JSON.parse(row.assets_json)
     return { recordId: row.id, createdAt: row.created_at, path: asset.localPath, status: asset.status }
   }
-  const reconcile = (paths, rows, io) => {
-    // Baseline reconciles every requested path with a synchronous stat.
-    for (const path of paths) {
-      try {
-        ;(io?.statSync ?? statSync)(path)
-      } catch {
-        /* missing files are tolerated */
+  const reconcile = (paths, rows, io, verifiedPresent = false) => {
+    // Baseline reconciles every requested path with a synchronous stat. A caller that has
+    // just verified each file passes verifiedPresent and skips it.
+    if (!verifiedPresent) {
+      for (const path of paths) {
+        try {
+          ;(io?.statSync ?? statSync)(path)
+        } catch {
+          /* missing files are tolerated */
+        }
       }
     }
     return rows.map(mapRow)
@@ -136,21 +139,24 @@ export function openRecords(file, { fold }) {
       const start = performance.now()
       const before = process.memoryUsage().heapUsed
       const index = new Map()
-      const rows = db
-        .prepare(
-          `SELECT h.rowid AS rid, ${expression} AS p
-           FROM records h
-           JOIN json_each(CASE WHEN json_valid(h.assets_json) THEN h.assets_json ELSE '[]' END) asset
-           WHERE ${expression} IS NOT NULL`
-        )
-        .iterate()
+      const rows = db.prepare('SELECT id, assets_json FROM records WHERE assets_json IS NOT NULL').iterate()
       for (const row of rows) {
-        const hash = hashKey(pathKey(row.p))
-        const current = index.get(hash)
-        if (current === undefined) index.set(hash, row.rid)
-        else if (typeof current === 'number') {
-          if (current !== row.rid) index.set(hash, [current, row.rid])
-        } else if (!current.includes(row.rid)) current.push(row.rid)
+        let parsed
+        try {
+          parsed = JSON.parse(row.assets_json)
+        } catch {
+          continue
+        }
+        if (!parsed || typeof parsed !== 'object') continue
+        for (const asset of Object.values(parsed)) {
+          if (typeof asset?.localPath !== 'string') continue
+          const hash = hashKey(pathKey(asset.localPath))
+          const current = index.get(hash)
+          if (current === undefined) index.set(hash, row.id)
+          else if (typeof current === 'string') {
+            if (current !== row.id) index.set(hash, [current, row.id])
+          } else if (!current.includes(row.id)) current.push(row.id)
+        }
       }
       memoryIndex = index
       return {
@@ -159,27 +165,27 @@ export function openRecords(file, { fold }) {
         entries: index.size
       }
     },
-    findByMemoryIndex(paths, io) {
+    findByMemoryIndex(paths, io, verifiedPresent = false) {
       const keys = [...new Set(paths.map(pathKey))]
       const rowIds = new Set()
       for (const key of keys) {
         const hit = memoryIndex.get(hashKey(key))
         if (hit === undefined) continue
-        if (typeof hit === 'number') rowIds.add(hit)
+        if (typeof hit === 'string') rowIds.add(hit)
         else for (const id of hit) rowIds.add(id)
       }
-      if (rowIds.size === 0) return reconcile(paths, [], io)
+      if (rowIds.size === 0) return reconcile(paths, [], io, verifiedPresent)
       const rows = db
         .prepare(
           `SELECT h.*, asset.value AS result_asset_json
            FROM records h
            JOIN json_each(CASE WHEN json_valid(h.assets_json) THEN h.assets_json ELSE '[]' END) asset
-           WHERE h.rowid IN (SELECT value FROM json_each(?))
+           WHERE h.id IN (SELECT value FROM json_each(?))
              AND ${matching} IN (SELECT value FROM json_each(?))
            ORDER BY h.created_at DESC, h.id ASC, CAST(asset.key AS INTEGER) ASC`
         )
         .all(JSON.stringify([...rowIds]), JSON.stringify(keys))
-      return reconcile(paths, rows, io)
+      return reconcile(paths, rows, io, verifiedPresent)
     },
     close() {
       db.close()

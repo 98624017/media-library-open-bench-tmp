@@ -17,7 +17,7 @@ const enabled = (part) => !only || only.includes(part)
 const isWin = process.platform === 'win32'
 const round = (value) => Math.round(value * 10) / 10
 const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
-const SAMPLE_CAP_MS = 8_000
+const SAMPLE_CAP_MS = 3_000
 
 /** `name=path;name=path`; defaults to the OS temp directory. */
 const roots = (process.env.BENCH_ROOTS ?? `local=${os.tmpdir()}`)
@@ -311,7 +311,7 @@ async function profiles(base, reduced) {
             variant === 'baseline'
               ? records.findByScan(paths, io)
               : variant === 'tight'
-                ? records.findByMemoryIndex(paths, io)
+                ? records.findByMemoryIndex(paths, io, true)
                 : records.findByIndex(paths, io)
           const elapsed = performance.now() - start
           associationMs += elapsed

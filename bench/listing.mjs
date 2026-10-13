@@ -297,15 +297,19 @@ export async function listProjectExports(projectRoots, io, { parallel = 1 } = {}
 }
 
 /**
- * Tight: keeps every per-directory and per-file safety check of the baseline, but resolves the
- * trusted anchors (root, registered directories) once per listing and reuses the canonical path
- * each check has just produced instead of resolving it again.
+ * Tight: keeps a canonical-path check for every directory and file, but resolves the trusted
+ * anchors once per listing, reuses the result each check has just produced, validates files
+ * without blocking the event loop, and walks sibling directories with bounded concurrency.
  */
 export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 48, timings } = {}) {
   const fold = (value) => (isWin ? value.toLowerCase() : value)
   const resolveAnchor = (value) => {
     const resolved = resolve(value)
-    return io.existsSync(resolved) ? normalize(io.realpathSyncNative(resolved)) : normalize(resolved)
+    try {
+      return normalize(io.realpathSyncNative(resolved))
+    } catch {
+      return normalize(resolved)
+    }
   }
   const inside = (parent, target) => {
     const rel = relative(fold(parent), fold(target))
@@ -314,6 +318,19 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
   const rootPath = await io.realpath(resolve(rootDir))
   const extras = extraDirs.map((extra) => ({ ...extra, resolved: resolveAnchor(extra.path), key: pathKey(extra.path) }))
   const extraKeys = new Set(extras.map((extra) => extra.key))
+  let active = 0
+  const waiting = []
+  const limit = async (task) => {
+    if (active >= 8) await new Promise((done) => waiting.push(done))
+    else active += 1
+    try {
+      return await task()
+    } finally {
+      const next = waiting.shift()
+      if (next) next()
+      else active -= 1
+    }
+  }
   const parts = (target) => {
     if (!inside(rootPath, target)) return null
     const value = relative(rootPath, target)
@@ -330,20 +347,30 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
     if (p.length === 2 && DATE_RE.test(p[0])) return groupFolder(p[1])
     return false
   }
-  const resolveDirectory = async (requested) => {
+  const resolveDirectory = async (requested, knownDirectory) => {
     let current = resolve(requested)
-    if ((await io.lstat(current)).isSymbolicLink()) throw new Error('symlink')
+    let isDirectory = knownDirectory
+    if (!knownDirectory) {
+      const info = await io.lstat(current)
+      if (info.isSymbolicLink()) throw new Error('symlink')
+      isDirectory = info.isDirectory()
+    }
+    const requestedKey = pathKey(current)
     current = await io.realpath(current)
     if (!allowedDirectory(current)) throw new Error(`denied ${current}`)
-    if (!(await io.stat(current)).isDirectory()) throw new Error('not a directory')
+    if (!isDirectory || pathKey(current) !== requestedKey) {
+      if (!(await io.stat(current)).isDirectory()) throw new Error('not a directory')
+    }
     return current
   }
-  const validateFile = async (absolute) => {
-    // Fresh evidence for the target itself; anchors are already canonical.
-    const real = normalize(io.realpathSyncNative(absolute))
+  const validateFile = async (absolute, info) => {
+    // Fresh evidence for the target itself, off the event loop; anchors are already canonical.
+    const real = normalize(await io.realpath(absolute))
     if (!inside(rootPath, real) && !extras.some((extra) => inside(extra.resolved, real))) throw new Error('denied')
     if (!visibleFile(basename(real)) || !allowedDirectory(dirname(real))) throw new Error('denied')
-    if (!(await io.stat(real)).isFile()) throw new Error('not a file')
+    if (!info.isFile() || pathKey(real) !== pathKey(absolute)) {
+      if (!(await io.stat(real)).isFile()) throw new Error('not a file')
+    }
     return real
   }
   const entryFromPath = async (filePath, name = basename(filePath)) => {
@@ -351,7 +378,7 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
     if (info.isSymbolicLink()) return null
     const directory = info.isDirectory()
     return {
-      path: directory ? filePath : await validateFile(resolve(filePath)),
+      path: directory ? filePath : await validateFile(resolve(filePath), info),
       name,
       directory,
       size: directory ? 0 : info.size,
@@ -369,7 +396,7 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
         if (DATE_RE.test(dirent.name) || dirent.name === EXPORT_DIR) candidates.push({ path: join(current, dirent.name) })
       }
       for (const extra of extras) {
-        if (inside(rootPath, extra.resolved) && basename(extra.path) === EXPORT_DIR) continue
+        if (basename(extra.path) === EXPORT_DIR && inside(rootPath, extra.resolved)) continue
         candidates.push({ path: extra.path, name: extra.label })
       }
     } else {
@@ -399,19 +426,22 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
     return results
   }
   const visited = new Set()
-  const discovered = []
-  const discover = async (directory, known) => {
-    const current = known ?? (await resolveDirectory(directory))
-    const key = pathKey(current)
-    if (visited.has(key)) return
-    visited.add(key)
-    for (const entry of await readEntries(current)) {
-      if (entry.directory) await discover(entry.path)
-      else discovered.push(entry)
-    }
+  const discover = async (directory, knownDirectory) => {
+    const entries = await limit(async () => {
+      const current = await resolveDirectory(directory, knownDirectory)
+      const key = pathKey(current)
+      if (visited.has(key)) return null
+      visited.add(key)
+      return readEntries(current)
+    })
+    if (!entries) return []
+    const files = entries.filter((entry) => !entry.directory)
+    const nested = await Promise.all(
+      entries.filter((entry) => entry.directory).map((entry) => discover(entry.path, true))
+    )
+    return files.concat(...nested)
   }
-  if (!(await io.stat(rootPath)).isDirectory()) throw new Error('not a directory')
-  await discover(rootPath, rootPath)
+  const discovered = await discover(rootPath, false)
   const unique = new Map()
   for (const entry of discovered) if (!unique.has(pathKey(entry.path))) unique.set(pathKey(entry.path), entry)
   let entries = [...unique.values()]
