@@ -6,7 +6,9 @@ const isWin = process.platform === 'win32'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 export const EXPORT_DIR = 'layer-exports'
-export const GROUP_FOLDERS = (process.env.BENCH_GROUP_FOLDERS ?? 'group-a,group-b,group-c,group-d').split(',')
+export const GROUP_FOLDERS = (
+  process.env.BENCH_GROUP_FOLDERS ?? 'group-a,group-b,group-c,group-d'
+).split(',')
 const BATCH_RE = /^batch-\d+$/
 const VISIBLE = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.txt'])
 const READ_BATCH = 32
@@ -28,21 +30,24 @@ function compareEntries(left, right) {
   return pathKey(left.path).localeCompare(pathKey(right.path))
 }
 
-function finish(entries, rootPath, pageSize, cheapSort, timings) {
+function finish(entries, rootPath, pageSize, sortPolicy, timings) {
   const start = performance.now()
-  const sorted = cheapSort
-    ? entries.sort((left, right) => {
-        const byTime = (right.createdAt ?? right.modifiedAt) - (left.createdAt ?? left.modifiedAt)
-        if (byTime !== 0) return byTime
-        const a = pathKey(left.path)
-        const b = pathKey(right.path)
-        return a < b ? -1 : a > b ? 1 : 0
-      })
-    : entries.sort(compareEntries)
+  const sorted =
+    sortPolicy !== 'baseline'
+      ? entries.sort((left, right) => {
+          const byTime = (right.createdAt ?? right.modifiedAt) - (left.createdAt ?? left.modifiedAt)
+          if (byTime !== 0) return byTime
+          const a = pathKey(left.path)
+          const b = pathKey(right.path)
+          if (sortPolicy === 'production') return a.localeCompare(b)
+          return a < b ? -1 : a > b ? 1 : 0
+        })
+      : entries.sort(compareEntries)
   const revision = createHash('sha256').update(JSON.stringify([rootPath, rootPath]))
   for (const entry of sorted) revision.update('\n').update(JSON.stringify(entry))
   const paths = createHash('sha256')
-  for (const key of sorted.map((entry) => pathKey(entry.path)).sort()) paths.update(key).update('\n')
+  for (const key of sorted.map((entry) => pathKey(entry.path)).sort())
+    paths.update(key).update('\n')
   const result = {
     total: sorted.length,
     revision: revision.digest('hex'),
@@ -57,7 +62,12 @@ function finish(entries, rootPath, pageSize, cheapSort, timings) {
  * Baseline: every directory and file is re-validated against the allowed roots with
  * synchronous exists/realpath pairs, and the library root is re-resolved per directory.
  */
-export async function listBaseline(rootDir, extraDirs, io, { associate, pageSize = 48, timings } = {}) {
+export async function listBaseline(
+  rootDir,
+  extraDirs,
+  io,
+  { associate, pageSize = 48, timings } = {}
+) {
   const resolvePath = (value) => {
     const resolved = resolve(value)
     if (io.existsSync(resolved)) return normalize(io.realpathSyncNative(resolved))
@@ -100,7 +110,11 @@ export async function listBaseline(rootDir, extraDirs, io, { associate, pageSize
     if ((await io.lstat(absolute)).isSymbolicLink()) throw new Error('symlink')
     const real = resolvePath(absolute)
     if (!io.existsSync(real)) throw new Error('missing')
-    if (![root, ...extraDirs.map((extra) => extra.path)].some((allowed) => isPathInside(allowed, real)))
+    if (
+      ![root, ...extraDirs.map((extra) => extra.path)].some((allowed) =>
+        isPathInside(allowed, real)
+      )
+    )
       throw new Error('denied')
     if (!visibleFile(basename(real)) || !isAllowedDirectory(root, dirname(real)))
       throw new Error('denied')
@@ -147,7 +161,8 @@ export async function listBaseline(rootDir, extraDirs, io, { associate, pageSize
       }
       if (inDate) {
         for (const extra of extraDirs) {
-          if (isPathInside(current, extra.path)) candidates.push({ path: extra.path, name: extra.label })
+          if (isPathInside(current, extra.path))
+            candidates.push({ path: extra.path, name: extra.label })
         }
       }
     }
@@ -178,20 +193,22 @@ export async function listBaseline(rootDir, extraDirs, io, { associate, pageSize
   const top = await resolveDirectory(rootDir, undefined)
   await discover(top.rootPath, top.path)
   const unique = new Map()
-  for (const entry of discovered) if (!unique.has(pathKey(entry.path))) unique.set(pathKey(entry.path), entry)
+  for (const entry of discovered)
+    if (!unique.has(pathKey(entry.path))) unique.set(pathKey(entry.path), entry)
   let entries = [...unique.values()]
   if (associate) {
     const matches = new Map()
     for (let offset = 0; offset < entries.length; offset += ASSOCIATION_BATCH) {
       const paths = entries.slice(offset, offset + ASSOCIATION_BATCH).map((entry) => entry.path)
-      for (const match of associate(paths)) if (!matches.has(pathKey(match.path))) matches.set(pathKey(match.path), match)
+      for (const match of associate(paths))
+        if (!matches.has(pathKey(match.path))) matches.set(pathKey(match.path), match)
     }
     entries = entries.map((entry) => {
       const match = matches.get(pathKey(entry.path))
       return match ? { ...entry, createdAt: match.createdAt, recordId: match.recordId } : entry
     })
   }
-  return finish(entries, top.rootPath, pageSize, false, timings)
+  return finish(entries, top.rootPath, pageSize, 'baseline', timings)
 }
 
 /**
@@ -210,7 +227,13 @@ export async function listLean(rootDir, extraDirs, io, { associate, pageSize = 4
           const filePath = join(directory, dirent.name)
           const info = await io.lstat(filePath).catch(() => null)
           if (!info || !info.isFile()) return null
-          return { path: filePath, name: dirent.name, directory: false, size: info.size, modifiedAt: info.mtimeMs }
+          return {
+            path: filePath,
+            name: dirent.name,
+            directory: false,
+            size: info.size,
+            modifiedAt: info.mtimeMs
+          }
         })
       )
       files.push(...batch.filter(Boolean))
@@ -249,14 +272,15 @@ export async function listLean(rootDir, extraDirs, io, { associate, pageSize = 4
     const matches = new Map()
     for (let offset = 0; offset < entries.length; offset += ASSOCIATION_BATCH) {
       const paths = entries.slice(offset, offset + ASSOCIATION_BATCH).map((entry) => entry.path)
-      for (const match of associate(paths)) if (!matches.has(pathKey(match.path))) matches.set(pathKey(match.path), match)
+      for (const match of associate(paths))
+        if (!matches.has(pathKey(match.path))) matches.set(pathKey(match.path), match)
     }
     entries = entries.map((entry) => {
       const match = matches.get(pathKey(entry.path))
       return match ? { ...entry, createdAt: match.createdAt, recordId: match.recordId } : entry
     })
   }
-  return finish(entries, rootPath, pageSize, true, timings)
+  return finish(entries, rootPath, pageSize, 'binary', timings)
 }
 
 /** Sequential discovery of registered project export directories (baseline behaviour). */
@@ -281,7 +305,9 @@ export async function listProjectExports(projectRoots, io, { parallel = 1 } = {}
         const info = await io.lstat(exportDir)
         if (!info.isDirectory() || info.isSymbolicLink()) return null
         const files = await io.readdir(exportDir, { withFileTypes: true })
-        if (!files.some((f) => f.isFile() && ['.psd', '.png'].includes(extname(f.name).toLowerCase())))
+        if (
+          !files.some((f) => f.isFile() && ['.psd', '.png'].includes(extname(f.name).toLowerCase()))
+        )
           return null
         return { path: exportDir, label: `${project.title} export` }
       } catch {
@@ -301,7 +327,12 @@ export async function listProjectExports(projectRoots, io, { parallel = 1 } = {}
  * anchors once per listing, reuses the result each check has just produced, validates files
  * without blocking the event loop, and walks sibling directories with bounded concurrency.
  */
-export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 48, timings } = {}) {
+export async function listTight(
+  rootDir,
+  extraDirs,
+  io,
+  { associate, pageSize = 48, timings } = {}
+) {
   const fold = (value) => (isWin ? value.toLowerCase() : value)
   const resolveAnchor = (value) => {
     const resolved = resolve(value)
@@ -316,7 +347,11 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
     return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
   }
   const rootPath = await io.realpath(resolve(rootDir))
-  const extras = extraDirs.map((extra) => ({ ...extra, resolved: resolveAnchor(extra.path), key: pathKey(extra.path) }))
+  const extras = extraDirs.map((extra) => ({
+    ...extra,
+    resolved: resolveAnchor(extra.path),
+    key: pathKey(extra.path)
+  }))
   const extraKeys = new Set(extras.map((extra) => extra.key))
   let active = 0
   const waiting = []
@@ -366,7 +401,8 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
   const validateFile = async (absolute, info) => {
     // Fresh evidence for the target itself, off the event loop; anchors are already canonical.
     const real = normalize(await io.realpath(absolute))
-    if (!inside(rootPath, real) && !extras.some((extra) => inside(extra.resolved, real))) throw new Error('denied')
+    if (!inside(rootPath, real) && !extras.some((extra) => inside(extra.resolved, real)))
+      throw new Error('denied')
     if (!visibleFile(basename(real)) || !allowedDirectory(dirname(real))) throw new Error('denied')
     if (!info.isFile() || pathKey(real) !== pathKey(absolute)) {
       if (!(await io.stat(real)).isFile()) throw new Error('not a file')
@@ -393,7 +429,8 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
     if (p.length === 0 && !extraOwner) {
       for (const dirent of dirents) {
         if (!dirent.isDirectory() || dirent.isSymbolicLink()) continue
-        if (DATE_RE.test(dirent.name) || dirent.name === EXPORT_DIR) candidates.push({ path: join(current, dirent.name) })
+        if (DATE_RE.test(dirent.name) || dirent.name === EXPORT_DIR)
+          candidates.push({ path: join(current, dirent.name) })
       }
       for (const extra of extras) {
         if (basename(extra.path) === EXPORT_DIR && inside(rootPath, extra.resolved)) continue
@@ -412,14 +449,17 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
       }
       if (inDate) {
         for (const extra of extras) {
-          if (inside(current, extra.resolved)) candidates.push({ path: extra.path, name: extra.label })
+          if (inside(current, extra.resolved))
+            candidates.push({ path: extra.path, name: extra.label })
         }
       }
     }
     const results = []
     for (let offset = 0; offset < candidates.length; offset += READ_BATCH) {
       const batch = await Promise.all(
-        candidates.slice(offset, offset + READ_BATCH).map((candidate) => entryFromPath(candidate.path, candidate.name))
+        candidates
+          .slice(offset, offset + READ_BATCH)
+          .map((candidate) => entryFromPath(candidate.path, candidate.name))
       )
       results.push(...batch.filter(Boolean))
     }
@@ -443,18 +483,20 @@ export async function listTight(rootDir, extraDirs, io, { associate, pageSize = 
   }
   const discovered = await discover(rootPath, false)
   const unique = new Map()
-  for (const entry of discovered) if (!unique.has(pathKey(entry.path))) unique.set(pathKey(entry.path), entry)
+  for (const entry of discovered)
+    if (!unique.has(pathKey(entry.path))) unique.set(pathKey(entry.path), entry)
   let entries = [...unique.values()]
   if (associate) {
     const matches = new Map()
     for (let offset = 0; offset < entries.length; offset += ASSOCIATION_BATCH) {
       const paths = entries.slice(offset, offset + ASSOCIATION_BATCH).map((entry) => entry.path)
-      for (const match of associate(paths)) if (!matches.has(pathKey(match.path))) matches.set(pathKey(match.path), match)
+      for (const match of associate(paths))
+        if (!matches.has(pathKey(match.path))) matches.set(pathKey(match.path), match)
     }
     entries = entries.map((entry) => {
       const match = matches.get(pathKey(entry.path))
       return match ? { ...entry, createdAt: match.createdAt, recordId: match.recordId } : entry
     })
   }
-  return finish(entries, rootPath, pageSize, true, timings)
+  return finish(entries, rootPath, pageSize, 'production', timings)
 }

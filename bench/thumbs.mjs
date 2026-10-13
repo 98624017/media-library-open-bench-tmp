@@ -8,9 +8,9 @@ const round = (value) => Math.round(value * 10) / 10
 export function measureColdLoad(samples = 4) {
   const script =
     "const s=performance.now();const sharp=require('sharp');const l=performance.now()-s;" +
-    "sharp.cache(false);const t=performance.now();" +
+    "if(process.platform==='win32')sharp.cache(false);const t=performance.now();" +
     "sharp({create:{width:64,height:64,channels:3,background:'#888'}}).jpeg().toBuffer()" +
-    ".then(()=>console.log(JSON.stringify({load:l,first:performance.now()-t})))"
+    '.then(()=>console.log(JSON.stringify({load:l,first:performance.now()-t})))'
   const results = []
   for (let i = 0; i < samples; i += 1) {
     const start = performance.now()
@@ -18,7 +18,11 @@ export function measureColdLoad(samples = 4) {
     const wall = performance.now() - start
     try {
       const parsed = JSON.parse(child.stdout.trim())
-      results.push({ processMs: round(wall), loadMs: round(parsed.load), firstOpMs: round(parsed.first) })
+      results.push({
+        processMs: round(wall),
+        loadMs: round(parsed.load),
+        firstOpMs: round(parsed.first)
+      })
     } catch {
       results.push({ processMs: round(wall), error: (child.stderr || '').slice(0, 200) })
     }
@@ -28,7 +32,7 @@ export function measureColdLoad(samples = 4) {
 
 export async function measureThumbnails(dir) {
   const { default: sharp } = await import('sharp')
-  sharp.cache(false)
+  if (process.platform === 'win32') sharp.cache(false)
   const width = 4096
   const height = 4096
   // Mildly compressible content: smooth gradient plus deterministic noise.
@@ -56,7 +60,10 @@ export async function measureThumbnails(dir) {
       .toBuffer()
     return `data:image/jpeg;base64,${buffer.toString('base64')}`.length
   }
-  const out = {}
+  const out = {
+    cachePolicy: process.platform === 'win32' ? 'disabled' : 'default',
+    versions: sharp.versions
+  }
   for (const [format, pair] of Object.entries(files)) {
     const runs = []
     for (let i = 0; i < 4; i += 1) {

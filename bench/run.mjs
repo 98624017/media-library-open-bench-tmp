@@ -8,11 +8,16 @@ import { createIo, summarizeIo } from './io.mjs'
 import { GROUP_FOLDERS, listBaseline, listLean, listProjectExports, listTight } from './listing.mjs'
 import { assetJson, openRecords } from './records.mjs'
 import { measureColdLoad, measureThumbnails } from './thumbs.mjs'
+import { probePathIdentity } from './mac-paths.mjs'
 
 const args = process.argv.slice(2)
 const quick = args.includes('--quick')
-const label = args.find((arg) => arg.startsWith('--label='))?.slice(8) ?? `${process.platform}-local`
-const only = args.find((arg) => arg.startsWith('--only='))?.slice(7).split(',')
+const label =
+  args.find((arg) => arg.startsWith('--label='))?.slice(8) ?? `${process.platform}-local`
+const only = args
+  .find((arg) => arg.startsWith('--only='))
+  ?.slice(7)
+  .split(',')
 const enabled = (part) => !only || only.includes(part)
 const isWin = process.platform === 'win32'
 const round = (value) => Math.round(value * 10) / 10
@@ -23,7 +28,10 @@ const SAMPLE_CAP_MS = 3_000
 const roots = (process.env.BENCH_ROOTS ?? `local=${os.tmpdir()}`)
   .split(';')
   .filter(Boolean)
-  .map((item) => ({ name: item.slice(0, item.indexOf('=')), base: item.slice(item.indexOf('=') + 1) }))
+  .map((item) => ({
+    name: item.slice(0, item.indexOf('=')),
+    base: item.slice(item.indexOf('=') + 1)
+  }))
 
 async function pool(items, limit, worker) {
   let next = 0
@@ -37,7 +45,10 @@ async function pool(items, limit, worker) {
 const dateName = (index) => new Date(Date.UTC(2020, 0, 1 + index)).toISOString().slice(0, 10)
 
 /** Builds a library tree. Returns the real paths of the files that should be listed. */
-async function buildLibrary(base, { dates, filesPerDate = 0, emptyGroupFolder = false, projects = 0, loose = 2 }) {
+async function buildLibrary(
+  base,
+  { dates, filesPerDate = 0, emptyGroupFolder = false, projects = 0, loose = 2 }
+) {
   const root = await fsp.mkdtemp(join(base, 'lib-'))
   const output = join(root, 'outputs')
   const directories = []
@@ -47,7 +58,9 @@ async function buildLibrary(base, { dates, filesPerDate = 0, emptyGroupFolder = 
     directories.push(date)
     if (emptyGroupFolder || filesPerDate > 0) directories.push(join(date, GROUP_FOLDERS[0]))
     for (let f = 0; f < filesPerDate; f += 1) {
-      files.push(f % 2 === 0 ? join(date, `img-${f}.png`) : join(date, GROUP_FOLDERS[0], `img-${f}.png`))
+      files.push(
+        f % 2 === 0 ? join(date, `img-${f}.png`) : join(date, GROUP_FOLDERS[0], `img-${f}.png`)
+      )
     }
   }
   const lastDate = join(output, dateName(Math.max(dates, 1) - 1))
@@ -64,13 +77,20 @@ async function buildLibrary(base, { dates, filesPerDate = 0, emptyGroupFolder = 
       JSON.stringify({
         projectId: id,
         title: `Project ${p}`,
-        layers: Array.from({ length: 60 }, (_, n) => ({ id: n, name: `layer-${n}`, box: [0, 0, 512, 512], note: 'n'.repeat(240) }))
+        layers: Array.from({ length: 60 }, (_, n) => ({
+          id: n,
+          name: `layer-${n}`,
+          box: [0, 0, 512, 512],
+          note: 'n'.repeat(240)
+        }))
       })
     ])
     files.push(join(projectRoot, id, 'exports', 'export.png'))
   }
   await pool(directories, 32, (dir) => fsp.mkdir(dir, { recursive: true }))
-  await pool(files, 64, (file) => fsp.writeFile(file, 'placeholder: listing never decodes image bytes'))
+  await pool(files, 64, (file) =>
+    fsp.writeFile(file, 'placeholder: listing never decodes image bytes')
+  )
   await pool(projectFiles, 32, ([file, body]) => fsp.writeFile(file, body))
   const realOutput = await fsp.realpath(output)
   return {
@@ -106,11 +126,29 @@ async function microCosts(base) {
     const rows = []
     rows.push(await perCall('existsSync', () => dirs.forEach((dir) => fs.existsSync(dir))))
     rows.push(await perCall('statSync', () => dirs.forEach((dir) => fs.statSync(dir))))
-    rows.push(await perCall('realpathSync.native', () => dirs.forEach((dir) => fs.realpathSync.native(dir))))
-    rows.push(await perCall('await lstat', async () => { for (const dir of dirs) await fsp.lstat(dir) }))
-    rows.push(await perCall('await stat', async () => { for (const dir of dirs) await fsp.stat(dir) }))
-    rows.push(await perCall('await realpath', async () => { for (const dir of dirs) await fsp.realpath(dir) }))
-    rows.push(await perCall('await readdir (empty)', async () => { for (const dir of dirs) await fsp.readdir(dir, { withFileTypes: true }) }))
+    rows.push(
+      await perCall('realpathSync.native', () => dirs.forEach((dir) => fs.realpathSync.native(dir)))
+    )
+    rows.push(
+      await perCall('await lstat', async () => {
+        for (const dir of dirs) await fsp.lstat(dir)
+      })
+    )
+    rows.push(
+      await perCall('await stat', async () => {
+        for (const dir of dirs) await fsp.stat(dir)
+      })
+    )
+    rows.push(
+      await perCall('await realpath', async () => {
+        for (const dir of dirs) await fsp.realpath(dir)
+      })
+    )
+    rows.push(
+      await perCall('await readdir (empty)', async () => {
+        for (const dir of dirs) await fsp.readdir(dir, { withFileTypes: true })
+      })
+    )
     rows.push(await perCall('lstat x32 parallel', () => pool(dirs, 32, (dir) => fsp.lstat(dir))))
     return Object.fromEntries(rows)
   } finally {
@@ -120,7 +158,10 @@ async function microCosts(base) {
 
 async function listingGrid(base, reduced) {
   const grid = quick
-    ? [{ dates: 30, projects: 0 }, { dates: 60, projects: 5 }]
+    ? [
+        { dates: 30, projects: 0 },
+        { dates: 60, projects: 5 }
+      ]
     : reduced
       ? [
           { dates: 30, projects: 10 },
@@ -130,19 +171,19 @@ async function listingGrid(base, reduced) {
           { dates: 180, filesPerDate: 20, projects: 10 }
         ]
       : [
-        { dates: 30, projects: 0 },
-        { dates: 30, projects: 10 },
-        { dates: 365, projects: 0 },
-        { dates: 365, projects: 10 },
-        { dates: 365, projects: 50 },
-        { dates: 1460, projects: 0 },
-        { dates: 1460, projects: 10 },
-        { dates: 1460, projects: 50 },
-        { dates: 180, filesPerDate: 20, projects: 0 },
-        { dates: 180, filesPerDate: 20, projects: 10 },
-        { dates: 700, filesPerDate: 30, projects: 0 },
-        { dates: 700, filesPerDate: 30, projects: 30 }
-      ]
+          { dates: 30, projects: 0 },
+          { dates: 30, projects: 10 },
+          { dates: 365, projects: 0 },
+          { dates: 365, projects: 10 },
+          { dates: 365, projects: 50 },
+          { dates: 1460, projects: 0 },
+          { dates: 1460, projects: 10 },
+          { dates: 1460, projects: 50 },
+          { dates: 180, filesPerDate: 20, projects: 0 },
+          { dates: 180, filesPerDate: 20, projects: 10 },
+          { dates: 700, filesPerDate: 30, projects: 0 },
+          { dates: 700, filesPerDate: 30, projects: 30 }
+        ]
   const rows = []
   for (const shape of grid) {
     const lib = await buildLibrary(base, shape)
@@ -154,12 +195,18 @@ async function listingGrid(base, reduced) {
           io = createIo()
           return list(lib.output, extra, io)
         })
-        return { ...result, io: summarizeIo(io), total: result.last.total, digest: result.last.pathsDigest }
+        return {
+          ...result,
+          io: summarizeIo(io),
+          total: result.last.total,
+          digest: result.last.pathsDigest
+        }
       }
       const baseline = await measure(listBaseline)
       const tight = await measure(listTight)
       const lean = await measure(listLean)
-      if (baseline.digest !== tight.digest) throw new Error(`Tight listing disagrees for ${JSON.stringify(shape)}`)
+      if (baseline.digest !== tight.digest)
+        throw new Error(`Tight listing disagrees for ${JSON.stringify(shape)}`)
       if (baseline.total !== lean.total || baseline.digest !== lean.digest)
         throw new Error(`Listing variants disagree for ${JSON.stringify(shape)}`)
       if (baseline.total !== lib.files.length)
@@ -170,11 +217,13 @@ async function listingGrid(base, reduced) {
         projects: shape.projects,
         baselineFirstMs: baseline.firstMs,
         baselineMedianMs: baseline.medianMs,
+        baselineSampleCount: baseline.samples.length,
         baselineBlockedMs: baseline.io.blockedMs,
         baselineSyncCalls: baseline.io.syncCalls,
         baselineAsyncCalls: baseline.io.asyncCalls,
         tightFirstMs: tight.firstMs,
         tightMedianMs: tight.medianMs,
+        tightSampleCount: tight.samples.length,
         tightBlockedMs: tight.io.blockedMs,
         tightSyncCalls: tight.io.syncCalls,
         tightAsyncCalls: tight.io.asyncCalls,
@@ -212,7 +261,13 @@ function seedUnrelated(records, count, assetsPerRecord, base) {
 async function recordLookup(base) {
   const sizes = quick
     ? [[1000, 4]]
-    : [[1000, 4], [10000, 4], [50000, 4], [10000, 20], [30000, 20]]
+    : [
+        [1000, 4],
+        [10000, 4],
+        [50000, 4],
+        [10000, 20],
+        [30000, 20]
+      ]
   const rows = []
   for (const [count, assetsPerRecord] of sizes) {
     const dir = await fsp.mkdtemp(join(base, 'db-'))
@@ -220,14 +275,17 @@ async function recordLookup(base) {
     try {
       const lib = await buildLibrary(dir, { dates: 1 })
       const folded = openRecords(file, { fold: true })
-      folded.insertMany([{ id: 'visible', createdAt: 1_700_000_000_000, assets: lib.files.map(assetJson) }])
+      folded.insertMany([
+        { id: 'visible', createdAt: 1_700_000_000_000, assets: lib.files.map(assetJson) }
+      ])
       seedUnrelated(folded, count, assetsPerRecord, dir)
       folded.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
       const sizeBefore = fs.statSync(file).size
       const plain = openRecords(file, { fold: false })
       const time = async (run) => {
         const result = await sample(async () => run(), 5)
-        if (result.last.length !== 2) throw new Error(`Expected 2 matches, got ${result.last.length}`)
+        if (result.last.length !== 2)
+          throw new Error(`Expected 2 matches, got ${result.last.length}`)
         return result
       }
       const scanFolded = await time(() => folded.findByScan(lib.files))
@@ -238,6 +296,10 @@ async function recordLookup(base) {
       const indexed = await time(() => folded.findByIndex(lib.files))
       const memory = folded.buildMemoryIndex()
       const memoryLookup = await time(() => folded.findByMemoryIndex(lib.files))
+      const nativeMemory = isWin ? memory : plain.buildMemoryIndex()
+      const nativeMemoryLookup = isWin
+        ? memoryLookup
+        : await time(() => plain.findByMemoryIndex(lib.files, undefined, true))
       rows.push({
         records: count,
         assets: count * assetsPerRecord,
@@ -251,7 +313,10 @@ async function recordLookup(base) {
         indexedMedianMs: indexed.medianMs,
         memoryBuildMs: round(memory.ms),
         memoryHeapMb: round(memory.heapMb),
-        memoryLookupMedianMs: memoryLookup.medianMs
+        memoryLookupMedianMs: memoryLookup.medianMs,
+        nativeMemoryBuildMs: round(nativeMemory.ms),
+        nativeMemoryHeapDeltaMb: round(nativeMemory.heapMb),
+        nativeMemoryLookupMedianMs: nativeMemoryLookup.medianMs
       })
       console.log('records', JSON.stringify(rows.at(-1)))
       plain.close()
@@ -264,15 +329,45 @@ async function recordLookup(base) {
 }
 
 async function profiles(base, reduced) {
-  const shapes = (quick
-    ? [{ name: 'new-user', dates: 1 }, { name: 'small', dates: 20, filesPerDate: 4, projects: 3, unrelated: [500, 4] }]
-    : [
-        { name: 'new-user (2 files)', dates: 1 },
-        { name: 'cleaned 1y (2 files left)', dates: 365, emptyGroupFolder: true, projects: 10, unrelated: [5000, 4] },
-        { name: 'cleaned 3y + projects (2 files left)', dates: 1000, emptyGroupFolder: true, projects: 50, unrelated: [20000, 4] },
-        { name: 'active 6mo (3.6k files)', dates: 180, filesPerDate: 20, projects: 10 },
-        { name: 'heavy 2y (21k files)', dates: 700, filesPerDate: 30, projects: 30, heavy: true }
-      ]
+  const shapes = (
+    quick
+      ? [
+          { name: 'new-user', dates: 1 },
+          { name: 'small', dates: 20, filesPerDate: 4, projects: 3, unrelated: [500, 4] }
+        ]
+      : [
+          { name: 'new-user (2 files)', dates: 1 },
+          {
+            name: 'cleaned 1y (exactly 2 files)',
+            dates: 365,
+            emptyGroupFolder: true,
+            projects: 0,
+            unrelated: [5000, 4]
+          },
+          {
+            name: 'cleaned 1y (2 images + 10 project exports)',
+            dates: 365,
+            emptyGroupFolder: true,
+            projects: 10,
+            unrelated: [5000, 4]
+          },
+          {
+            name: 'cleaned 3y (exactly 2 files)',
+            dates: 1000,
+            emptyGroupFolder: true,
+            projects: 0,
+            unrelated: [20000, 4]
+          },
+          {
+            name: 'cleaned 3y (2 images + 50 project exports)',
+            dates: 1000,
+            emptyGroupFolder: true,
+            projects: 50,
+            unrelated: [20000, 4]
+          },
+          { name: 'active 6mo (3.6k files)', dates: 180, filesPerDate: 20, projects: 10 },
+          { name: 'heavy 2y (21k files)', dates: 700, filesPerDate: 30, projects: 30, heavy: true }
+        ]
   ).filter((shape) => !(reduced && shape.heavy))
   const rows = []
   for (const shape of shapes) {
@@ -296,53 +391,89 @@ async function profiles(base, reduced) {
         const io = createIo()
         const timings = {}
         let associationMs = 0
+        let memoryBuildMs = 0
         const startProjects = performance.now()
-        const extra = await listProjectExports(lib.projectRoots, io, { parallel: variant === 'baseline' ? 1 : 8 })
+        // Production project discovery remains sequential; parallel discovery is hypothetical.
+        const extra = await listProjectExports(lib.projectRoots, io, {
+          parallel: variant === 'candidate' ? 8 : 1
+        })
         const projectsMs = performance.now() - startProjects
-        // The in-memory index is rebuilt once per listing: the worst case after a write.
-        let memoryReady = false
+        // `tight` forces a rebuild after a write; `tight-warm` reuses the preceding unchanged index.
+        const usesMemory = variant === 'tight' || variant === 'tight-warm'
+        let memoryReady = variant === 'tight-warm'
         const associate = (paths) => {
           const start = performance.now()
-          if (variant === 'tight' && !memoryReady) {
-            records.buildMemoryIndex()
+          const syncBefore = io.state.syncMs
+          if (usesMemory && !memoryReady) {
+            memoryBuildMs = records.buildMemoryIndex().ms
             memoryReady = true
           }
           const matches =
             variant === 'baseline'
               ? records.findByScan(paths, io)
-              : variant === 'tight'
+              : usesMemory
                 ? records.findByMemoryIndex(paths, io, true)
                 : records.findByIndex(paths, io)
           const elapsed = performance.now() - start
           associationMs += elapsed
-          io.blocked(elapsed)
+          // File-stat time is already counted by the facade; count only the remaining SQL/JS time.
+          io.blocked(Math.max(0, elapsed - (io.state.syncMs - syncBefore)))
           return matches
         }
-        const list = variant === 'baseline' ? listBaseline : variant === 'tight' ? listTight : listLean
+        const list = variant === 'baseline' ? listBaseline : usesMemory ? listTight : listLean
         const result = await list(lib.output, extra, io, { associate, timings })
-        if (result.page.some((entry) => !entry.recordId)) throw new Error('Unassociated entry on first page')
-        return { result, projectsMs, associationMs, finishMs: timings.finishMs, io: summarizeIo(io) }
+        if (result.page.some((entry) => !entry.recordId))
+          throw new Error('Unassociated entry on first page')
+        return {
+          result,
+          projectsMs,
+          associationMs,
+          memoryBuildMs,
+          finishMs: timings.finishMs,
+          io: summarizeIo(io)
+        }
       }
       const measured = {}
-      for (const variant of ['baseline', 'tight', 'candidate']) {
+      for (const variant of ['baseline', 'tight', 'tight-warm', 'candidate']) {
         const result = await sample(run(variant))
         const stages = result.last
         measured[variant] = {
           firstMs: result.firstMs,
           medianMs: result.medianMs,
+          sampleCount: result.samples.length,
           projectsMs: round(stages.projectsMs),
           associationMs: round(stages.associationMs),
+          memoryBuildMs: round(stages.memoryBuildMs),
           sortHashMs: round(stages.finishMs),
           blockedMs: stages.io.blockedMs,
           syncCalls: stages.io.syncCalls,
           asyncCalls: stages.io.asyncCalls,
           total: stages.result.total,
-          digest: stages.result.pathsDigest
+          digest: stages.result.pathsDigest,
+          pageIdentity: JSON.stringify(
+            stages.result.page.map((entry) => [entry.path, entry.recordId])
+          )
         }
       }
-      if (measured.baseline.digest !== measured.tight.digest || measured.baseline.digest !== measured.candidate.digest || measured.baseline.total !== lib.files.length)
+      if (
+        ['tight', 'tight-warm', 'candidate'].some(
+          (variant) => measured.baseline.digest !== measured[variant].digest
+        ) ||
+        measured.baseline.total !== lib.files.length
+      )
         throw new Error(`Profile variants disagree: ${shape.name}`)
-      rows.push({ profile: shape.name, files: lib.files.length, indexBuildMs: round(indexBuildMs), ...flatten(measured) })
+      if (
+        measured.baseline.pageIdentity !== measured.tight.pageIdentity ||
+        measured.baseline.pageIdentity !== measured['tight-warm'].pageIdentity
+      )
+        throw new Error(`First-page association or ordering disagrees: ${shape.name}`)
+      rows.push({
+        profile: shape.name,
+        files: lib.files.length,
+        projects: shape.projects ?? 0,
+        indexBuildMs: round(indexBuildMs),
+        ...flatten(measured)
+      })
       console.log('profile', JSON.stringify(rows.at(-1)))
       records.close()
     } finally {
@@ -356,7 +487,8 @@ function flatten(measured) {
   const out = {}
   for (const [variant, values] of Object.entries(measured)) {
     for (const [key, value] of Object.entries(values)) {
-      if (key !== 'digest' && key !== 'total') out[`${variant}.${key}`] = value
+      if (key !== 'digest' && key !== 'total' && key !== 'pageIdentity')
+        out[`${variant}.${key}`] = value
     }
   }
   return out
@@ -393,6 +525,9 @@ function environment() {
     memoryGb: round(os.totalmem() / 2 ** 30),
     node: process.version,
     sqlite: sqliteVersion,
+    commit: process.env.GITHUB_SHA ?? null,
+    runnerImage: { os: process.env.ImageOS ?? null, version: process.env.ImageVersion ?? null },
+    sampleCapMs: SAMPLE_CAP_MS,
     defender: powershell(
       'Get-MpComputerStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,OnAccessProtectionEnabled,IoavProtectionEnabled | ConvertTo-Json -Compress'
     ),
@@ -404,14 +539,16 @@ function environment() {
 function table(rows) {
   if (!rows?.length) return '_no rows_\n'
   const keys = Object.keys(rows[0])
-  return [
-    `| ${keys.join(' | ')} |`,
-    `| ${keys.map(() => '---').join(' | ')} |`,
-    ...rows.map((row) => `| ${keys.map((key) => row[key]).join(' | ')} |`)
-  ].join('\n') + '\n'
+  return (
+    [
+      `| ${keys.join(' | ')} |`,
+      `| ${keys.map(() => '---').join(' | ')} |`,
+      ...rows.map((row) => `| ${keys.map((key) => row[key]).join(' | ')} |`)
+    ].join('\n') + '\n'
+  )
 }
 
-const report = { env: environment(), roots: {} }
+const report = { env: environment(), roots: {}, completed: false }
 console.log('env', JSON.stringify(report.env))
 const save = async () => {
   await fsp.mkdir('results', { recursive: true })
@@ -423,14 +560,18 @@ for (const root of roots) {
   const reduced = root.name !== 'local'
   report.roots[root.name] = section
   console.log(`--- root ${root.name}: ${root.base}`)
+  if (enabled('paths')) section.pathIdentity = await probePathIdentity(root.base)
+  await save()
   if (enabled('micro')) section.microUsPerCall = await microCosts(root.base)
   if (enabled('micro')) console.log('micro', JSON.stringify(section.microUsPerCall))
+  await save()
   if (enabled('listing')) section.listing = await listingGrid(root.base, reduced)
   await save()
   if (enabled('profiles')) section.profiles = await profiles(root.base, reduced)
   await save()
 }
 if (enabled('records')) report.records = await recordLookup(roots[0].base)
+await save()
 if (enabled('thumbs')) {
   report.imageColdLoad = measureColdLoad()
   const dir = await fsp.mkdtemp(join(roots[0].base, 'img-'))
@@ -439,7 +580,10 @@ if (enabled('thumbs')) {
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
-  console.log('thumbs', JSON.stringify({ cold: report.imageColdLoad, thumbnails: report.thumbnails }))
+  console.log(
+    'thumbs',
+    JSON.stringify({ cold: report.imageColdLoad, thumbnails: report.thumbnails })
+  )
 }
 
 let markdown = `## ${label}\n\n\`\`\`json\n${JSON.stringify(report.env, null, 2)}\n\`\`\`\n\n`
@@ -447,13 +591,18 @@ for (const [name, section] of Object.entries(report.roots)) {
   markdown += `### Root: ${name}\n\n`
   if (section.microUsPerCall)
     markdown += `Per-call cost (microseconds)\n\n${table([section.microUsPerCall])}\n`
-  if (section.listing) markdown += `Listing only (no record association)\n\n${table(section.listing)}\n`
+  if (section.listing)
+    markdown += `Listing only (no record association)\n\n${table(section.listing)}\n`
   if (section.profiles) markdown += `End-to-end profiles\n\n${table(section.profiles)}\n`
+  if (section.pathIdentity)
+    markdown += `Path identity observations\n\n\`\`\`json\n${JSON.stringify(section.pathIdentity, null, 2)}\n\`\`\`\n`
 }
 if (report.records) markdown += `### Record lookup for two paths\n\n${table(report.records)}\n`
-if (report.imageColdLoad) markdown += `### Image library cold load\n\n${table(report.imageColdLoad)}\n`
+if (report.imageColdLoad)
+  markdown += `### Image library cold load\n\n${table(report.imageColdLoad)}\n`
 if (report.thumbnails)
   markdown += `### Two 4096x4096 thumbnails\n\n\`\`\`json\n${JSON.stringify(report.thumbnails)}\n\`\`\`\n`
+report.completed = true
 await fsp.mkdir('results', { recursive: true })
 await fsp.writeFile(join('results', `${label}.json`), JSON.stringify(report, null, 2))
 await fsp.writeFile(join('results', `${label}.md`), markdown)

@@ -1,0 +1,144 @@
+name: mac-bench
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mac-open-bench]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: macos-14-arm64, os: macos-14, arch: arm64 }
+          - { label: macos-15-arm64, os: macos-15, arch: arm64 }
+          - { label: macos-26-arm64, os: macos-26, arch: arm64 }
+          - { label: macos-15-intel-x64, os: macos-15-intel, arch: x64 }
+          - { label: ubuntu-24.04-control, os: ubuntu-24.04, arch: x64 }
+    env:
+      BENCH_LABEL: ${{ matrix.label }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: actions/setup-node@v4
+        timeout-minutes: 5
+        with:
+          node-version: 22
+      - name: Install locked dependencies
+        timeout-minutes: 5
+        run: npm ci --no-audit --no-fund
+
+      - name: Record runtime and dependency versions
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          mkdir -p results
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict'
+          import fs from 'node:fs'
+          import os from 'node:os'
+          import { DatabaseSync } from 'node:sqlite'
+          import sharp from 'sharp'
+          assert.equal(process.arch, process.env.EXPECTED_ARCH, 'runner architecture differs from the requested matrix')
+          const db = new DatabaseSync(':memory:')
+          const metadata = {
+            label: process.env.BENCH_LABEL, platform: process.platform, arch: process.arch,
+            node: process.version, kernel: os.release(), osVersion: os.version(),
+            sharp: sharp.versions, sqlite: db.prepare('SELECT sqlite_version() AS version').get().version
+          }
+          db.close()
+          fs.writeFileSync('results/runtime-env.json', JSON.stringify(metadata, null, 2))
+          console.log(JSON.stringify(metadata))
+          JS
+          uname -a > results/uname.txt
+
+      - name: Create disposable APFS and HFS+ volumes
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          bench_mount_dir=$(mktemp -d "$RUNNER_TEMP/media-bench.XXXXXX")
+          printf '%s\n' "BENCH_MOUNT_DIR=$bench_mount_dir" >> "$GITHUB_ENV"
+          mkdir "$bench_mount_dir/local" "$bench_mount_dir/apfs-sensitive" "$bench_mount_dir/hfs"
+          sw_vers > results/sw_vers.txt
+          hdiutil create -size 3g -type SPARSE -fs APFSX -volname BenchApfsSensitive "$bench_mount_dir/apfs-sensitive.sparseimage"
+          hdiutil attach -nobrowse -noautoopen -mountpoint "$bench_mount_dir/apfs-sensitive" -plist "$bench_mount_dir/apfs-sensitive.sparseimage" > results/apfs-sensitive-attach.plist
+          hdiutil create -size 3g -type SPARSE -fs HFS+ -volname BenchHfs "$bench_mount_dir/hfs.sparseimage"
+          hdiutil attach -nobrowse -noautoopen -mountpoint "$bench_mount_dir/hfs" -plist "$bench_mount_dir/hfs.sparseimage" > results/hfs-attach.plist
+          bench_local_device=$(df -P "$bench_mount_dir/local" | awk 'NR == 2 { print $1 }')
+          test -n "$bench_local_device"
+          diskutil info -plist "$bench_local_device" > results/local-disk.plist
+          diskutil info -plist "$bench_mount_dir/apfs-sensitive" > results/apfs-sensitive-disk.plist
+          diskutil info -plist "$bench_mount_dir/hfs" > results/hfs-disk.plist
+          df -h "$bench_mount_dir/local" "$bench_mount_dir/apfs-sensitive" "$bench_mount_dir/hfs" > results/disk-space.txt
+          printf '%s\n' "BENCH_ROOTS=local=$bench_mount_dir/local;apfs-sensitive=$bench_mount_dir/apfs-sensitive;hfs=$bench_mount_dir/hfs" >> "$GITHUB_ENV"
+
+      - name: Configure Linux control root
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          bench_control_dir=$(mktemp -d "$RUNNER_TEMP/media-bench.XXXXXX")
+          printf '%s\n' "BENCH_MOUNT_DIR=$bench_control_dir" >> "$GITHUB_ENV"
+          printf '%s\n' "BENCH_ROOTS=local=$bench_control_dir" >> "$GITHUB_ENV"
+          df -T "$bench_control_dir" > results/local-disk.txt
+
+      - name: Run all measurements and path observations
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, sys
+          try:
+              result = subprocess.run(['node', 'bench/run.mjs', '--label=' + os.environ['BENCH_LABEL']], timeout=295)
+          except subprocess.TimeoutExpired:
+              print('Benchmark exceeded 295 seconds; partial JSON is retained as evidence.', file=sys.stderr)
+              sys.exit(124)
+          sys.exit(result.returncode)
+          PY
+
+      - name: Clean disposable benchmark storage
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, plistlib, shutil, subprocess, sys
+          owned_path = os.environ.get('BENCH_MOUNT_DIR')
+          if owned_path:
+              directory = pathlib.Path(owned_path).resolve()
+              runner_temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve()
+              if directory.parent != runner_temp or not directory.name.startswith('media-bench.'):
+                  raise RuntimeError('Refusing cleanup outside the mktemp-owned benchmark directory')
+              if sys.platform == 'darwin':
+                  info = subprocess.run(['hdiutil', 'info', '-plist'], check=True, capture_output=True, timeout=30)
+                  attached = {
+                      pathlib.Path(entity['mount-point']).resolve(): entity['mount-point']
+                      for image in plistlib.loads(info.stdout).get('images', [])
+                      for entity in image.get('system-entities', [])
+                      if entity.get('mount-point')
+                  }
+                  for name in ['hfs', 'apfs-sensitive']:
+                      mount = (directory / name).resolve()
+                      if mount in attached:
+                          subprocess.run(['hdiutil', 'detach', attached[mount]], check=True, timeout=90)
+              shutil.rmtree(directory)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        timeout-minutes: 5
+        with:
+          name: results-${{ matrix.label }}
+          path: results
+          if-no-files-found: error
+          retention-days: 30
