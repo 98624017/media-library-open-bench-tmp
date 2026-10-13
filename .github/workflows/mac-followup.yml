@@ -1,0 +1,211 @@
+name: mac-followup
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mac-open-followup]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: macos-26-arm64-followup, os: macos-26, arch: arm64, records: true }
+          - { label: macos-15-intel-x64-followup, os: macos-15-intel, arch: x64, records: true, secondary: true }
+          - { label: macos-15-arm64-sharp-repeat, os: macos-15, arch: arm64, sharp_repeat: true }
+    env:
+      BENCH_LABEL: ${{ matrix.label }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: actions/setup-node@v4
+        timeout-minutes: 5
+        with:
+          node-version: 22
+      - name: Install locked dependencies
+        timeout-minutes: 5
+        run: npm ci --no-audit --no-fund
+
+      - name: Record runtime and dependency versions
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          mkdir -p results
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict'
+          import fs from 'node:fs'
+          import os from 'node:os'
+          import { DatabaseSync } from 'node:sqlite'
+          import sharp from 'sharp'
+          assert.equal(process.arch, process.env.EXPECTED_ARCH, 'runner architecture differs from the requested matrix')
+          const db = new DatabaseSync(':memory:')
+          const metadata = {
+            label: process.env.BENCH_LABEL, platform: process.platform, arch: process.arch,
+            node: process.version, kernel: os.release(), osVersion: os.version(),
+            sharp: sharp.versions, sqlite: db.prepare('SELECT sqlite_version() AS version').get().version
+          }
+          db.close()
+          fs.writeFileSync('results/runtime-env.json', JSON.stringify(metadata, null, 2))
+          console.log(JSON.stringify(metadata))
+          JS
+          uname -a > results/uname.txt
+
+      - name: Create disposable APFS and HFS+ volumes
+        id: storage
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          bench_mount_dir=$(mktemp -d "$RUNNER_TEMP/media-bench.XXXXXX")
+          printf '%s\n' "BENCH_MOUNT_DIR=$bench_mount_dir" >> "$GITHUB_ENV"
+          mkdir "$bench_mount_dir/local" "$bench_mount_dir/apfs-sensitive" "$bench_mount_dir/hfs"
+          sw_vers > results/sw_vers.txt
+          hdiutil create -size 3g -type SPARSE -fs APFS -fsargs '-e' -volname BenchApfsSensitive "$bench_mount_dir/apfs-sensitive.sparseimage"
+          hdiutil attach -nobrowse -noautoopen -mountpoint "$bench_mount_dir/apfs-sensitive" -plist "$bench_mount_dir/apfs-sensitive.sparseimage" > results/apfs-sensitive-attach.plist
+          hdiutil create -size 3g -type SPARSE -fs HFS+ -volname BenchHfs "$bench_mount_dir/hfs.sparseimage"
+          hdiutil attach -nobrowse -noautoopen -mountpoint "$bench_mount_dir/hfs" -plist "$bench_mount_dir/hfs.sparseimage" > results/hfs-attach.plist
+          bench_local_device=$(df -P "$bench_mount_dir/local" | awk 'NR == 2 { print $1 }')
+          test -n "$bench_local_device"
+          diskutil info -plist "$bench_local_device" > results/local-disk.plist
+          diskutil info -plist "$bench_mount_dir/apfs-sensitive" > results/apfs-sensitive-disk.plist
+          diskutil info -plist "$bench_mount_dir/hfs" > results/hfs-disk.plist
+          python3 - <<'PY'
+          import pathlib, plistlib
+          apfs = plistlib.loads(pathlib.Path('results/apfs-sensitive-disk.plist').read_bytes())
+          hfs = plistlib.loads(pathlib.Path('results/hfs-disk.plist').read_bytes())
+          assert apfs.get('FilesystemType') == 'apfs', apfs
+          assert 'case-sensitive' in apfs.get('FilesystemName', '').lower(), apfs
+          assert hfs.get('FilesystemType') == 'hfs', hfs
+          PY
+          df -h "$bench_mount_dir/local" "$bench_mount_dir/apfs-sensitive" "$bench_mount_dir/hfs" > results/disk-space.txt
+
+      - name: Complete Intel APFS profiles
+        if: ${{ !cancelled() && steps.storage.conclusion == 'success' && matrix.secondary }}
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BENCH_ONLY: profiles
+          BENCH_ROOT: apfs-sensitive
+          BENCH_SUFFIX: apfs-profiles
+        run: &run-section |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          section = os.environ['BENCH_ONLY']
+          root = os.environ['BENCH_ROOT']
+          label = os.environ['BENCH_LABEL'] + '-' + os.environ['BENCH_SUFFIX']
+          environment = {**os.environ, 'BENCH_ROOTS': root + '=' + os.environ['BENCH_MOUNT_DIR'] + '/' + root}
+          subprocess.run(['node', 'bench/run.mjs', '--only=' + section, '--label=' + label], env=environment, check=True, timeout=295)
+          report = json.loads((pathlib.Path('results') / (label + '.json')).read_text(encoding='utf-8'))
+          assert report.get('completed') is True, 'requested benchmark did not complete'
+          for part in section.split(','):
+              if part == 'records':
+                  assert len(report['records']) == 5
+              elif part == 'thumbs':
+                  assert len(report['imageColdLoad']) == 4
+                  assert all('error' not in row and row['loadMs'] >= 0 and row['firstOpMs'] >= 0 for row in report['imageColdLoad'])
+                  for format in ['jpeg', 'png']:
+                      assert len(report['thumbnails'][format]['twoImagesMs']) == 4
+              elif part == 'profiles':
+                  assert len(report['roots'][root]['profiles']) == 6
+              elif part == 'listing':
+                  assert len(report['roots'][root]['listing']) == 5
+              elif part == 'paths':
+                  assert report['roots'][root]['pathIdentity']['observations']
+              elif part == 'micro':
+                  assert report['roots'][root]['microUsPerCall']
+          print('Verified completed evidence:', label)
+          PY
+
+      - name: Complete Intel HFS discovery
+        if: ${{ !cancelled() && steps.storage.conclusion == 'success' && matrix.secondary }}
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BENCH_ONLY: paths,micro,listing
+          BENCH_ROOT: hfs
+          BENCH_SUFFIX: hfs-discovery
+        run: *run-section
+
+      - name: Complete Intel HFS profiles
+        if: ${{ !cancelled() && steps.storage.conclusion == 'success' && matrix.secondary }}
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BENCH_ONLY: profiles
+          BENCH_ROOT: hfs
+          BENCH_SUFFIX: hfs-profiles
+        run: *run-section
+
+      - name: Complete local history lookup
+        if: ${{ !cancelled() && steps.storage.conclusion == 'success' && matrix.records }}
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BENCH_ONLY: records
+          BENCH_ROOT: local
+          BENCH_SUFFIX: records
+        run: *run-section
+
+      - name: Measure local Sharp and thumbnails
+        if: ${{ !cancelled() && steps.storage.conclusion == 'success' }}
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BENCH_ONLY: thumbs
+          BENCH_ROOT: local
+          BENCH_SUFFIX: thumbs
+        run: *run-section
+
+      - name: Repeat local Sharp in four more fresh processes
+        if: ${{ !cancelled() && steps.storage.conclusion == 'success' && matrix.sharp_repeat }}
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BENCH_ONLY: thumbs
+          BENCH_ROOT: local
+          BENCH_SUFFIX: thumbs-repeat
+        run: *run-section
+
+      - name: Clean disposable benchmark storage
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, plistlib, shutil, subprocess
+          owned_path = os.environ.get('BENCH_MOUNT_DIR')
+          if owned_path:
+              directory = pathlib.Path(owned_path).resolve()
+              runner_temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve()
+              if directory.parent != runner_temp or not directory.name.startswith('media-bench.'):
+                  raise RuntimeError('Refusing cleanup outside the mktemp-owned benchmark directory')
+              info = subprocess.run(['hdiutil', 'info', '-plist'], check=True, capture_output=True, timeout=30)
+              attached = {
+                  pathlib.Path(entity['mount-point']).resolve(): entity['mount-point']
+                  for image in plistlib.loads(info.stdout).get('images', [])
+                  for entity in image.get('system-entities', [])
+                  if entity.get('mount-point')
+              }
+              for name in ['hfs', 'apfs-sensitive']:
+                  mount = (directory / name).resolve()
+                  if mount in attached:
+                      subprocess.run(['hdiutil', 'detach', attached[mount]], check=True, timeout=90)
+              shutil.rmtree(directory)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        timeout-minutes: 5
+        with:
+          name: results-${{ matrix.label }}
+          path: results
+          if-no-files-found: error
+          retention-days: 30

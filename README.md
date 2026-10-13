@@ -44,6 +44,16 @@ gh run download RUN_ID --dir /path/to/new-empty-evidence-directory
 Artifacts have a 30-day retention period. Each step has a five-minute limit; the
 benchmark subprocess has a 295-second limit and uploads partial saved data on failure.
 
+Push `mac-open-followup` to run the targeted `mac-followup.yml` workflow. It fills
+the missing sections from the initial aggregate timeout without repeating completed
+scans: macOS 26 arm64 runs local history lookup and thumbnails; macOS 15 Intel runs
+APFS profiles, HFS discovery/profiles, then local history lookup and thumbnails.
+macOS 15 arm64 repeats thumbnails twice on a fresh runner, giving eight fresh-process
+Sharp loads. Each independent section has its own 295-second limit and unique output
+label; later sections still run if an unrelated measurement fails. The workflow
+checks `completed: true` and the requested rows before accepting each output. The
+underlying benchmark scripts are unchanged from the first sweep.
+
 Path observations compare stored raw paths with paths actually returned by `listTight`,
 then use all three lookup variants and check whether the resulting cards receive
 their record IDs. They cover a configured-root symlink, mixed-case directory spelling,
