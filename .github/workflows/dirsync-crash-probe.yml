@@ -31,7 +31,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
           try {
             $env:PROBE_ROOT = $probeRoot
-            node .\probe.mjs
+            node ./probe.mjs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -42,6 +42,26 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
+
+          function Invoke-DiskPartStage([string] $stage, [string[]] $commands, [string] $scriptPath, [string] $vhdPath) {
+            Set-Content -LiteralPath $scriptPath -Value $commands -Encoding ascii
+            $output = (& diskpart.exe /s $scriptPath 2>&1 | Out-String)
+            $exitCode = $LASTEXITCODE
+            $failure = $output -match '(?i)(error|failed|invalid|incorrect|not enough|too small|cannot)'
+            if ($exitCode -eq 0 -and -not $failure) {
+              return [pscustomobject]@{ Ok = $true; Stage = $stage; Code = 0; Detail = '' }
+            }
+            $errorLines = @($output -split '\r?\n' | Where-Object { $_ -match '(?i)(error|failed|invalid|incorrect|not enough|too small|cannot)' })
+            $safeDetails = @(
+              $errorLines | ForEach-Object {
+                $line = ($_.ToString().Trim() -replace '\x1b\[[0-9;]*[A-Za-z]', '').Replace($vhdPath, '<temporary-vhd>').Replace($scriptPath, '<temporary-script>')
+                if ($line -notmatch '(?i)([A-Z]:\\|\\\\)') { $line }
+              } | Select-Object -Last 2
+            )
+            $category = if ($output -match '(?i)not enough') { 'not-enough-space' } elseif ($output -match '(?i)too small') { 'volume-too-small' } elseif ($output -match '(?i)(invalid|incorrect)') { 'invalid-command' } elseif ($output -match '(?i)access denied') { 'access-denied' } elseif ($exitCode -ne 0) { 'exit-code-only' } else { 'native-error' }
+            $detail = if ($safeDetails.Count -gt 0) { $safeDetails -join ' | ' } else { $category }
+            return [pscustomobject]@{ Ok = $false; Stage = $stage; Code = $exitCode; Detail = $detail }
+          }
 
           function Invoke-VolumeProbe([string] $fileSystem) {
             $ErrorActionPreference = 'Stop'
@@ -61,20 +81,40 @@ jobs:
                 Write-Output "volume=$fileSystem result=not-tested reason=no-free-drive-letter"
                 return
               }
-              $commands = @(
-                "create vdisk file=`"$vhdPath`" maximum=512 type=expandable",
-                "select vdisk file=`"$vhdPath`"",
-                'attach vdisk',
-                'create partition primary',
-                "format fs=$fileSystem quick label=DIRSYNC$fileSystem",
-                "assign letter=$driveLetter",
-                'exit'
+              $stages = @(
+                @{ Name = 'create'; Commands = @(
+                  "create vdisk file=`"$vhdPath`" maximum=512 type=expandable",
+                  'exit'
+                ) },
+                @{ Name = 'attach'; Commands = @(
+                  "select vdisk file=`"$vhdPath`"",
+                  'attach vdisk',
+                  'exit'
+                ) },
+                @{ Name = 'partition'; Commands = @(
+                  "select vdisk file=`"$vhdPath`"",
+                  'create partition primary',
+                  'exit'
+                ) },
+                @{ Name = 'format'; Commands = @(
+                  "select vdisk file=`"$vhdPath`"",
+                  'select partition 1',
+                  "format fs=$fileSystem quick label=DIRSYNC",
+                  'exit'
+                ) },
+                @{ Name = 'assign'; Commands = @(
+                  "select vdisk file=`"$vhdPath`"",
+                  'select partition 1',
+                  "assign letter=$driveLetter",
+                  'exit'
+                ) }
               )
-              Set-Content -LiteralPath $diskpartPath -Value $commands -Encoding ascii
-              & diskpart.exe /s $diskpartPath | Out-Null
-              if ($LASTEXITCODE -ne 0) {
-                Write-Output "volume=$fileSystem result=not-tested reason=diskpart-failed"
-                return
+              foreach ($diskpartStage in $stages) {
+                $stageResult = Invoke-DiskPartStage $diskpartStage.Name $diskpartStage.Commands $diskpartPath $vhdPath
+                if (-not $stageResult.Ok) {
+                  Write-Output "volume=$fileSystem result=not-tested reason=diskpart-failed stage=$($stageResult.Stage) code=$($stageResult.Code) detail=$($stageResult.Detail)"
+                  return
+                }
               }
               $volume = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
               $disk = Get-DiskImage -ImagePath $vhdPath -ErrorAction Stop | Get-Disk -ErrorAction Stop
@@ -88,7 +128,7 @@ jobs:
               $env:PROBE_ROOT = $probeRoot
               $env:PROBE_VOLUME_FS = $fileSystem
               $probeStarted = $true
-              node .\probe.mjs
+              node ./probe.mjs
               if ($LASTEXITCODE -ne 0) { throw "probe-failed-$fileSystem" }
             } catch {
               if ($probeStarted) {
@@ -102,7 +142,7 @@ jobs:
                 if (Test-Path -LiteralPath $probeRoot) { $cleanupFailed = $true }
               }
               if (Get-Command Dismount-DiskImage -ErrorAction SilentlyContinue) {
-                Dismount-DiskImage -ImagePath $vhdPath -ErrorAction SilentlyContinue
+                Dismount-DiskImage -ImagePath $vhdPath -ErrorAction SilentlyContinue | Out-Null
               }
               if (Test-Path -LiteralPath $vhdPath) {
                 $detach = @(
@@ -124,3 +164,5 @@ jobs:
 
           Invoke-VolumeProbe 'FAT32'
           Invoke-VolumeProbe 'exFAT'
+          $global:LASTEXITCODE = 0
+          exit 0
