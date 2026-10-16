@@ -11,7 +11,7 @@ permissions:
 jobs:
   probe:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -31,10 +31,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
           try {
             $env:PROBE_ROOT = $probeRoot
+            $env:PROBE_EVIDENCE = Join-Path $env:RUNNER_TEMP 'registry-long-journal-base.json'
             node ./probe.mjs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node ./long-journal-probe.mjs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:PROBE_EVIDENCE -ErrorAction SilentlyContinue
           }
 
       - name: Probe FAT32 and exFAT virtual volumes
@@ -127,9 +131,12 @@ jobs:
               New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
               $env:PROBE_ROOT = $probeRoot
               $env:PROBE_VOLUME_FS = $fileSystem
+              $env:PROBE_EVIDENCE = Join-Path $env:RUNNER_TEMP ("registry-long-journal-" + $fileSystem + '.json')
               $probeStarted = $true
               node ./probe.mjs
               if ($LASTEXITCODE -ne 0) { throw "probe-failed-$fileSystem" }
+              node ./long-journal-probe.mjs
+              if ($LASTEXITCODE -ne 0) { throw "long-journal-probe-failed-$fileSystem" }
             } catch {
               if ($probeStarted) {
                 Write-Output "volume=$fileSystem result=failed reason=probe-assertion-failed"
@@ -159,6 +166,7 @@ jobs:
               if ($cleanupFailed) { Write-Output "volume=$fileSystem cleanup=not-tested reason=temporary-volume-remove-failed" }
               Remove-Item Env:PROBE_ROOT -ErrorAction SilentlyContinue
               Remove-Item Env:PROBE_VOLUME_FS -ErrorAction SilentlyContinue
+              Remove-Item Env:PROBE_EVIDENCE -ErrorAction SilentlyContinue
             }
           }
 
@@ -166,3 +174,11 @@ jobs:
           Invoke-VolumeProbe 'exFAT'
           $global:LASTEXITCODE = 0
           exit 0
+
+      - name: Upload long-journal synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: registry-long-journal-${{ matrix.os }}
+          path: ${{ runner.temp }}/registry-long-journal-*.json
+          if-no-files-found: ignore
